@@ -714,6 +714,10 @@ dall'e2e. File principali:
 - **Stato / priorità:** Da fare / P1.
 - **Proprietario:** documents/knowledge; worker; web documenti/raccolte.
 - **Dipendenze:** P-08.
+- **Gate esplicito dell'utente (24/09/2026):** vale il gate WeKnora
+  descritto sotto in [P-11](#p-11--retrieval-locale-con-embedding-e-fonti-verificabili):
+  non iniziare l'ingest documentale qui senza aver prima discusso con
+  l'utente l'adozione di WeKnora come gestore documenti/RAG.
 - **Contratto e risultato:** documenti/raccolte e job di ingestione scoped;
   stati uploaded/processing/ready/failed/deleting da definire nei DTO,
   con errore e retry espliciti. Primo corpus TXT/Markdown/PDF testuale/DOCX.
@@ -760,6 +764,17 @@ dall'e2e. File principali:
 - **Stato / priorità:** Da fare / P1.
 - **Proprietario:** knowledge/retrieval, adapter embedding; web fonti.
 - **Dipendenze:** P-07, P-09.
+- **Gate esplicito dell'utente (24/09/2026):** prima di iniziare
+  l'implementazione di questo ticket (e di P-09, che lo precede), discutere
+  con l'utente l'opportunità di adottare
+  [WeKnora](https://github.com/Tencent/WeKnora) (Tencent) come gestore
+  documenti/RAG — al posto di, o accanto a, la pipeline bespoke descritta
+  sotto (ingest §P-09 + pgvector/FTS qui). Richiesto esplicitamente
+  dall'utente; valutazione non ancora fatta (research-first: licenza,
+  provenienza/manutenzione, self-hosting locale coerente con NewRay.md
+  local-first, superficie dati/egress verso NewRay.md §7/§19, confronto
+  con "nessun cloud fallback" già vincolante in questo ticket). Non
+  iniziare P-09/P-11 senza aver chiuso questa discussione.
 - **Contratto e risultato:** ricerca scoped su documenti/raccolte autorizzati,
   ritorna chunk/source/version/score e riferimenti apribili; tool documentale
   attraverso gateway, senza dipendenza dal provider nel dominio.
