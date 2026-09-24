@@ -1,0 +1,1 @@
+"""Adapter del modulo runs."""

@@ -1,0 +1,104 @@
+{
+  "migration_fixture_upgrade_targets": [
+    "newray"
+  ],
+  "snapshot_mutable": true,
+  "snapshot_aliases_binding": true,
+  "profiles_after_failure_and_retry": {
+    "profiles": 2,
+    "versions": 1,
+    "visible": 1
+  },
+  "validation_error": {
+    "status": 422,
+    "keys": [
+      "detail"
+    ]
+  },
+  "logout_then_me": [
+    204,
+    401
+  ],
+  "foreign_origin_revoke_status": 204,
+  "remote_bind_with_cookie_only": "0.0.0.0",
+  "forbidden_imports_not_detected": [],
+  "negative_timeout_accepted": -1,
+  "ollama_length": {
+    "events": [
+      {
+        "text": "Ciao"
+      },
+      {
+        "finish_reason": "stop",
+        "prompt_tokens": null,
+        "completion_tokens": null
+      }
+    ],
+    "timeouts": {
+      "connect": null,
+      "read": null,
+      "write": null,
+      "pool": null
+    }
+  },
+  "ollama_eof": {
+    "events": [
+      {
+        "text": "Ciao"
+      }
+    ],
+    "timeouts": {
+      "connect": null,
+      "read": null,
+      "write": null,
+      "pool": null
+    }
+  },
+  "ollama_unknown_schema": {
+    "events": [],
+    "timeouts": {
+      "connect": null,
+      "read": null,
+      "write": null,
+      "pool": null
+    }
+  },
+  "ollama_duplicate_completion": {
+    "events": [
+      {
+        "finish_reason": "stop",
+        "prompt_tokens": null,
+        "completion_tokens": null
+      },
+      {
+        "finish_reason": "stop",
+        "prompt_tokens": null,
+        "completion_tokens": null
+      }
+    ],
+    "timeouts": {
+      "connect": null,
+      "read": null,
+      "write": null,
+      "pool": null
+    }
+  },
+  "ollama_disconnect": {
+    "events": [
+      {
+        "text": "Ciao"
+      }
+    ],
+    "timeouts": {
+      "connect": null,
+      "read": null,
+      "write": null,
+      "pool": null
+    },
+    "error_type": "NetworkUnreachable"
+  },
+  "qualification_warmup_failure": {
+    "escaped": "OSError",
+    "client_closed": false
+  }
+}

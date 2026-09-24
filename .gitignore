@@ -1,0 +1,42 @@
+# Ambiente e segreti locali
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# JavaScript e build
+node_modules/
+web/node_modules
+dist/
+web/dist
+web/build
+build/
+coverage/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# Dati operativi: NEWRAY_DATA_DIR va configurato fuori dai sorgenti
+/data/
+/runtime/
+/backups/
+*.log
+
+# Editor e sistema
+.DS_Store
+*~
+*.swp
+
+# I lockfile e i contratti generati devono essere versionati.

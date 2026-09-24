@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Avvio locale assistito, senza privilegi amministrativi.
+set -euo pipefail
+if [[ "$#" -gt 1 || ( "$#" -eq 1 && "$1" != "--web" ) ]]; then
+  printf 'Uso: %s [--web]\n' "$0" >&2
+  exit 2
+fi
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+command -v uv >/dev/null || { printf 'Installa uv per preparare il backend.\n' >&2; exit 1; }
+command -v npm >/dev/null || { printf 'Installa Node.js >=22 e npm per la WebUI.\n' >&2; exit 1; }
+command -v node >/dev/null || { printf 'Installa Node.js >=22 per la WebUI.\n' >&2; exit 1; }
+node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' || {
+  printf 'NewRay richiede Node.js >=22.\n' >&2; exit 1;
+}
+printf 'Verifico le dipendenze backend…\n'
+uv sync --locked --project "$repo_root/backend"
+exec "$repo_root/backend/.venv/bin/python" "$repo_root/scripts/start_local.py"

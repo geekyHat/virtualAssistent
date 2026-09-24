@@ -1,0 +1,2390 @@
+# Backlog NewRay
+
+Unico registro del progetto. Aggiornato il 23 settembre 2026.
+Stati: da fare, in corso, completato, bloccato. Un incremento è completato
+solo quando soddisfa il criterio di uscita con evidenze identificabili.
+
+Piano di consegna integrata aggiornato sulla richiesta dell'utente:
+[funzioni backend → WebUI → prove utente](#piano-integrazione-webui).
+La UI attuale espone bootstrap, login, sessione e una **preview chat inline**.
+La preview non è il run durevole di B-04–B-07: una chiusura backend non implica
+che la funzione sia già utilizzabile dal browser e una demo browser non chiude
+persistenza, recupero, coda, replay o cancellazione autorevole.
+
+## Priorità UX acquisita — 23 settembre 2026
+
+Prima di estendere la chat, riorganizzare l'area di lavoro con **B-08.8**:
+l'area centrale resta dedicata alla concentrazione sul contenuto corrente;
+conversazioni, profili, modelli e successive funzioni vivono in un pannello
+laterale destro modulare, ispirato alla gerarchia visiva del riferimento
+OpenClaw fornito dall'utente senza copiarne marchio o asset. È lavoro WebUI,
+non un nuovo modulo backend: usa le API e gli scope già presenti. Le future
+feature aggiungono pannelli tramite la propria API pubblica soltanto quando
+esiste un caso d'uso reale, senza placeholder operativi o autorizzazioni nel
+browser.
+
+Aggiornamento del 23/09: la shell B-08.8 è stata implementata e verificata
+su trasporto controllato. I controlli chat vivono nel pannello destro; il
+centro contiene solo lavoro corrente e composer. I tre difetti trovati nel
+riesame successivo al report (stream della conversazione A visibile in B,
+replay dello switch profilo dipendente dallo stato successivo, CRLF SSE
+spezzato tra chunk) hanno una correzione nei ticket B-03.2-37/38/39 sotto;
+la concorrenza PostgreSQL del ticket 38 attende ancora la qualifica su DB reale.
+Questo non anticipa B-04–B-07 né la prova browser→PostgreSQL reale di B-09.
+
+## Riesame del codice e riallineamento — 22 settembre 2026
+
+L'analisi fornita dall'utente è sostanzialmente confermata dal codice. La base
+A/B resta coerente con NewRay.md e ben coperta; il rischio è concentrato nella
+chat aggiunta il 22 settembre dopo l'ultimo aggiornamento del ledger. Questo
+riesame aggiorna pianificazione e stati, non qualifica retroattivamente la
+preview come run NewRay.
+
+- **Lavoro presente ma non registrato:** `routes/chat.py`, `EchoChatModel`,
+  `features/chat/*`, `ConversationsPage.tsx` e `chat.spec.ts` realizzano lista,
+  creazione/eliminazione, cronologia semplice, selettore profilo e generazione
+  inline in streaming. B-08.2/3/4/5 e B-09.2 passano quindi da «da fare» a
+  **in corso**, con i residui esplicitati nelle rispettive sezioni.
+- **Deviazione contenuta, non accettata come architettura finale:** la route
+  `POST /conversations/{id}/run` genera ancora nella richiesta HTTP, ma dal
+  22/09 usa l'owner `runs`, valida prima degli effetti, salva la coppia
+  user/assistant atomicamente ed è idempotente. Non esistono ancora entità run,
+  worker, lease, snapshot o stop durevole: B-04–B-07 restano «da fare».
+- **Difetto frontend confermato:** `useChat.ts` non associa `event:` al relativo
+  `data:`; ignora i payload terminali `done`/`error` e deduce `stop`/`empty` dal
+  testo. Un `length` può apparire completo e un errore SSE può non essere
+  mostrato. B-03.2-35 è il primo intervento frontend.
+- **Backend inline corretto il 22/09:** I/O PostgreSQL offloadato per blocchi,
+  budget esplicito 50 messaggi/100.000 caratteri/2.048 token, nessun prompt
+  orfano su errore/EOF/cancel, terminali `stop`/`length` distinti e nessun Echo
+  nel wiring di produzione. Contract, unit e integrazione PostgreSQL coprono il
+  confine; la persistenza durevole appartiene ancora a B-04–B-07.
+- **Sicurezza residua:** B-03.2-22 è chiuso con RLS/scope organizations e revoca
+  scoped; B-03.2-14 (recupero owner legacy) e B-03.2-26
+  (cache/abort/risposte tardive) restano aperti. `CREDENTIAL_NOT_SET` è una
+  segnalazione, non un recupero.
+- **Modelli locali:** lo smoke del 22 settembre ha caricato 4/4 modelli; resta
+  corretta la distinzione da B-03.4: soltanto 1/4 è qualificato sul workflow.
+- **Processo:** la directory non è un worktree Git; non sono stati inizializzati
+  repository o commit perché questa analisi non autorizza una mutazione di
+  processo. Le evidenze restano file e fingerprint finché l'utente lo decide.
+
+### TODO separati per area
+
+Questa vista assegna il lavoro; gli stati e i criteri completi restano nelle
+sezioni dettagliate sotto.
+
+| Area | TODO aperti, nell'ordine della coda agile |
+| --- | --- |
+| Backend | B-02.2 stato runtime; residui B-03.2; B-04/05 run+worker; B-06/07 eventi+cancel; B-03.4 qualifica. Completati il 22/09: B-03.2-34, 36 e 22; il 23/09: B-02.1 (switch modello, manca solo il provisioning esplicito iniziale), B-03.2-14 (recupero CLI + fix RLS su update_credential_hash) |
+| Frontend | B-08.3 cronologia sicura; B-08.4 profilo/modello; B-09.1 browser; B-08.5 composer durevole; B-08.6 reducer/stream/stop; B-08.7 strumenti/fonti. Completati il 23/09: **B-08.8 shell concentrata e pannelli modulari**, B-03.2-35/37/39 SSE e isolamento stream, B-08.2 CRUD conversazioni, B-03.2-26/33 client/sessione (trasporto mock; PostgreSQL reale resta in B-09.1/B-09.2; correlation ID in UI resta aperto) |
+| Integrato | B-09.2 browser→API→PostgreSQL con modello deterministico; B-09.3 Ollama reale qualificato; poi slice C–H, ciascuna con backend e frontend separati |
+
+### Coda agile alternata backend/frontend
+
+Ogni riga è una consegna piccola e verificabile. Si completa la parte backend
+e subito il consumer frontend corrispondente; non si avviano in parallelo
+superfici dipendenti da contratti non ancora generati.
+
+| Ordine | Corsia | Ticket | Risultato verificabile |
+| --- | --- | --- | --- |
+| 1 | Backend | B-03.2-34 | **Completato 22/09:** contratto autorevole per token/s da conteggio e durata del runtime, coperto da adapter/HTTP/live test |
+| 2 | Frontend | B-03.2-35 | **Completato 23/09:** parser SSE corretto e meter token/s; `length`/errore/cancel visibili senza false completion |
+| 3 | Backend | B-03.2-36 + B-03.2-11 | **Completato 22/09:** preview inline resa onesta e coperta, niente Echo fallback o DB sincrono nel loop; piano di rimozione verso B-04 |
+| 4 | Frontend | B-08.2 | **Completato 23/09 (trasporto mock):** rinomina, cursori, conflitto di versione e conferma cancellazione; resta la prova su PostgreSQL reale (B-09.1/B-09.2) |
+| 5 | Backend | B-03.2-22 | **Completato 22/09:** organizations scoped con RLS/grant minimi e revoca autorizzata su PostgreSQL reale |
+| 6 | Frontend | B-03.2-26/33 | **Completato 23/09 (trasporto mock):** timeout/AbortSignal, 401 coordinato, cache/stream su logout, doppio invio diagnosticato e corretto (guardia sincrona), error boundary; correlation ID in UI resta aperto |
+| 7 | Backend | B-03.2-14 | **Completato 23/09:** comando CLI di recupero, autorizzato dal solo accesso locale, senza reset dati, con revoca di tutte le sessioni; corretto anche un bug reale di RLS su `update_credential_hash` (0 righe aggiornate su Postgres, mai segnalato) |
+| 8 | Frontend | B-08.3 | Cronologia paginata/deduplicata e contenuti esterni sanitizzati |
+| 9 | Backend | B-02.1/2 | Provisioning profilo/modello e stati runtime distinti, senza fallback |
+| 10 | Frontend | B-08.4 | Scelta profilo/modello persistente con stati e conflitti comprensibili |
+| 11 | Backend | residui B-03.2 | Gateway, deploy, qualifica tooling, CI, indici e igiene chiudono il gate |
+| 12 | Frontend | B-09.1 | Sessione, due identità e superfici già presenti verificate nel browser |
+| 13 | Backend | B-04/05 | Run durevole, snapshot, idempotenza, budget, worker, coda e recovery |
+| 14 | Frontend | B-08.5 | Composer migra dalla preview al contratto run coordinato |
+| 15 | Backend | B-06/07 | Eventi persistenti/replay e cancel idempotente autorevole |
+| 16 | Frontend | B-08.6 | Reducer, riconnessione e Stop convergono allo snapshot server |
+| 17 | Integrato | B-09.2/3 | Catena reale completa, poi qualifica Ollama con digest/hardware/corpus |
+
+## Riesame del report esterno e divisione del lavoro — 21 settembre 2026
+
+Richiesta dell'utente: verificare il report di Anne e separare i TODO frontend
+da quelli backend. [Valutazione e prove ripetute](../report-analisi-newray.md).
+Questa revisione modifica solo documentazione e pianificazione, non applica
+le patch suggerite. Gli ID storici restano validi; il report non è un secondo
+ledger. I dettagli di accettazione e gli stati sono registrati qui.
+
+- **Backend:** confermati nome owner non normalizzato (B-03.2-30), fixture
+  storica incompatibile con 0005 (B-03.2-29), costo login differente
+  (B-03.2-31). La porta organizzazioni senza scope confluisce in B-03.2-22/28:
+  nessun exploit HTTP dimostrato, nessun ticket duplicato.
+- **Frontend:** durante il riesame la suite browser ha rilevato due POST
+  nel test del doppio click (B-03.2-33). B-03.2-13 e la validazione B-09.1
+  tornano in corso; runner e casi già funzionanti restano acquisiti.
+- **Identità:** B-03.2-14 torna in corso: login presente, recupero legacy
+  assente, normalizzazione e hardening incompleti. La divergenza fra
+  pwdlib/Argon2 prescritti da NewRay.md e hashing attuale è B-03.2-32.
+- **Gate:** backend offline 212 passed/46 skipped (44 PostgreSQL + 2 live
+  Ollama); PostgreSQL temporaneo 43 passed/1 failed; web check verde,
+  browser UI 11 passed/1 failed. Nessuna chiusura sulla sola analisi statica.
+
+### Snapshot storico dell'ordine operativo al 21 settembre
+
+Questa è una vista di assegnazione, non una seconda lista di stati. Per i
+ticket trasversali ogni area realizza la propria parte; la chiusura richiede
+il contratto integrato e le prove comuni. P1 precede P2/P3; all'interno della
+priorità valgono le dipendenze, non il numero del ticket.
+
+| Area | Coda di lavoro e dipendenze |
+| --- | --- |
+| Backend — stabilizzazione | 14 (recupero locale); 31/32 (hardening e libreria credenziali), 22 (scope), 15 (errori/DTO). Contratti rigenerati prima dei consumer FE. |
+| Backend — modelli | B-02.1 (provisioning/versioni) e B-02.2 + B-03.2-10 (stato runtime); B-03.4 qualifica reale distinta dall'installazione. |
+| Backend — infrastruttura | Residui B-03.2-16/17/19/20/21/24/27/28; test e launcher non implicano qualifica dei deployment non provati. |
+| Backend — chat | Solo dopo il gate B-03.2: B-04 (run) → B-05 (worker), B-06 (eventi) e B-07 (cancel); contratti scoped per B-08.5/6. |
+| Frontend — affidabilità | B-03.2-33 → chiusura 13 e B-09.1; parte UI di 14 (recupero), 26 (timeout/401/cache), 28 (i18n). Il backend già normalizzato non sostituisce i test del browser. |
+| Frontend — funzioni esistenti | B-03.3 (completato 21/09) → B-08.1 (completato 21/09) → B-08.2/3 (CRUD/storia sulle API esistenti), senza aspettare il motore run. |
+| Frontend — modello e chat | B-08.4 dopo B-02.1/2; B-08.5/6 dopo B-04/05/06/07; B-08.7 solo con strumenti e consumer reali C–F. |
+| Verifica integrata | B-09.2 browser→API→PostgreSQL con modello deterministico; B-09.3 con Ollama reale qualificato. Mock HTTP UI, DB reale e live inference sono evidenze distinte. |
+
+Dettagli: [TODO backend](#todo-backend), [TODO frontend](#todo-frontend),
+[prove condivise](#prove-condivise),
+[consolidamento backend](#consolidamento-backend),
+[consolidamento frontend](#consolidamento-frontend).
+
+## Preparazione
+
+| ID | Attività | Stato | Risultato |
+| --- | --- | --- | --- |
+| S-01 | Leggere la specifica e organizzare il repository | Completato | README, aree principali, mappa architetturale e ADR 0001–0004 |
+| S-02 | Materializzare le istruzioni per agenti | Completato | AGENTS.md, agent.md, istruzioni backend/web e quattro skills della sezione 24.3 |
+
+## Incrementi
+
+| ID | Risultato | Stato | Criterio di uscita |
+| --- | --- | --- | --- |
+| A | Base avviabile | In corso | Stack bloccato, principal, DB, API/UI, contratti, migrazioni e CI verificati |
+| B | Assistente | In corso | Chat con profilo/Ollama, stream, coda, stop e recupero; scope dati verificato |
+| C | Documenti | Da fare | Upload → estrazione → retrieval → fonti, isolamento e cancellazione verificati |
+| D | Elaborati e immagini | Da fare | Bozza modificabile, DOCX/PDF apribili, OCR/visione con limiti dichiarati |
+| E | Internet | Da fare | Search/lettura/fonti verificabili e controllo dei dati in uscita |
+| F | Email e calendario | Da fare | Collegamenti, bozze, conferme vincolate e riconciliazione degli esiti |
+| G | Estensibilità e ufficio | Da fare | Catalogo/attivazione reversibili, amministrazione, sharing e isolamento qualificati |
+| H | Crescita | Da fare | Memoria assistita e proposte di metodo con miglioramento misurato |
+
+## Primo incremento: A
+
+| ID | Attività | Stato | Verifica richiesta |
+| --- | --- | --- | --- |
+| A-01 | Risolvere stack minimo e licenze, produrre uv.lock e package-lock.json | Completato | Installazione ripetibile con lock e versioni runtime dichiarate; evidenze sotto la tabella |
+| A-02 | Principal, identità iniziale e scope dal server | Completato | Profilo AI distinto dal ruolo; identificativi del browser non fidati; evidenze sotto la tabella |
+| A-03 | PostgreSQL/pgvector, prima migrazione e ruoli DB separati | Completato | Migrazioni e isolamento con due principal e ruolo applicativo reale; evidenze sotto la tabella |
+| A-04 | Bootstrap API e prima pagina React collegata | Completato | Percorso UI → API → caso d'uso → dati verificabile, errori recuperabili; evidenze sotto la tabella |
+| A-05 | DTO e generazione contratti/client | Completato | OpenAPI/schema/TypeScript coerenti, rigenerazione senza drift; evidenze sotto la tabella |
+| A-06 | Controlli architetturali, suite offline e CI | Completato | Confini import, lint, tipi, test e build eseguiti realmente; evidenze sotto la tabella |
+| A-07 | Config e avvio Linux documentati | Completato | Servizi minimi avviabili, bind loopback, dati separati dai sorgenti; evidenze sotto la tabella |
+
+### Evidenze A-01 (16 settembre 2026)
+
+- `backend/uv.lock`: 45 pacchetti risolti su CPython 3.12.12. Runtime bloccato:
+  fastapi 0.141.1, uvicorn 0.53.0, pydantic 2.13.5, pydantic-settings 2.15.0,
+  sqlalchemy 2.0.54, alembic 1.20.0, psycopg 3.3.5, httpx 0.28.1; dev: ruff
+  0.16.7, mypy 2.3.1, pytest 9.1.1.
+- `web/package-lock.json`: react 19.3.0, react-dom 19.3.0, react-router-dom
+  7.18.4, @tanstack/react-query 5.103.0; dev: vite 6.4.3, @vitejs/plugin-react
+  4.7.0, typescript 5.8.3.
+- Riproducibilità verificata: `uv sync --locked` e `npm ci --ignore-scripts`
+  eseguiti con successo; `uv run pytest` 2/2 (smoke test import), `uv run ruff
+  check .`, `uv run ruff format --check .`, `uv run mypy` puliti.
+- Licenze registrate nei README di area: MIT/BSD-3-Clause per il resto dello
+  stack; Apache-2.0 typescript; **LGPL-2.1-or-later psycopg** (scelta di base
+  NewRay.md §4.2, da portare nella decisione di licenza del progetto).
+
+### Evidenze A-02 (16 settembre 2026)
+
+- Kernel condiviso (`backend/src/newray/kernel/`): `identity.py` (Principal,
+  Scope, Role, ID opachi `new_id()`), `errors.py` (DomainError con codici
+  stabili SESSION_INVALID/ACCESS_DENIED/CONFLICT, §19.4), `clock.py` (Clock
+  iniettabile + SystemClock).
+- Modulo identity (`backend/src/newray/modules/identity/`): `domain.py`
+  (Organization, User, Session con revoca/scadenza), `ports.py`
+  (UserRepository, SessionStore), `application.py` (IdentityService:
+  bootstrap_owner monouso §20.3, create_session, resolve_principal,
+  revoke_session; TTL predefinito 30 giorni), `public.py` come unico punto
+  di import.
+- Modulo profiles: solo `domain.py` con `AProfile` (assistant/researcher/
+  coder) + `public.py`; binding e versioni rimandati a B.
+- Confine HTTP (`backend/src/newray/interfaces/http/middleware/identity.py`):
+  `resolve_principal_from_request` legge solo il cookie `newray_session`;
+  `Unauthenticated` (UNAUTHENTICATED) per cookie assente/malformato.
+- Test: unit (tipi e casi d'uso) + contratti (HTTP anti-frode, scope
+  repository) con fake in `backend/tests/fakes/` (FakeClock,
+  InMemoryUserRepository, InMemorySessionStore).
+- Verifica: `uv run pytest` 18/18, `uv run ruff check .`, `uv run ruff
+  format --check .`, `uv run mypy` puliti (18 file sorgente).
+- Criteri di uscita coperti dai test:
+  `test_ruolo_account_e_profilo_ai_sono_assi_distinti` (ProfiloAI ≠ ruolo;
+  il Principal non ha campo profilo) e
+  `test_header_di_identita_non_sono_fidati` + `test_principal_rivien_da_record_di_server`
+  (X-User-Id/X-Role ignorati; principal solo dai record di server).
+- Limiti: niente persistenza (l'adapter PostgreSQL delle porte identity
+  arriva in A-03), niente emission cookie (attributi HttpOnly/SameSite/Secure
+  nella route di A-04), `get_owner()` senza scope è il percorso di bootstrap
+  documentato in `ports.py`, da evolvere con l'edizione ufficio (G).
+  (Correzione A-03: `get_owner()` è stato rimosso; il bootstrap è
+  garantito atomicamente dalla scrittura, senza letture fuori scope.)
+
+### Evidenze A-03 (16 settembre 2026)
+
+- Server di prova: PostgreSQL 18.6 + pgvector 0.8.6 reale (non fake né
+  SQLite, §22.2); in questo ambiente compilato da sorgente su prefix locale
+  e avviato su 127.0.0.1:5433, l'istanza di produzione arriva con A-07.
+- `backend/scripts/db/bootstrap.sql`: ruoli `newray_migrate` (proprietario
+  migrazioni) e `newray_app` (app, NOSUPERUSER/NOBYPASSRLS verificato a
+  runtime), database `newray`/`newray_test`, estensione pgvector.
+- `backend/alembic.ini` + `backend/migrations/` (env.py: DSN da
+  `NEWRAY_MIGRATION_DATABASE_URL`, migrazioni scritte a mano) e
+  `versions/0001_identity.py`: organizzazioni/utenti/sessioni con FK e
+  vincoli compositi anti-cross-org (§7.2), vincolo "un owner per
+  installazione" che rende atomico il bootstrap monouso (§20.3), RLS con
+  FORCE su `users`/`sessions` (policies su `app.user_id`/
+  `app.organization_id`; risoluzione sessioni via ID opaco presentato
+  `app.session_lookup_id`, §7.1), grant DML al ruolo app senza CREATE.
+- `src/newray/infrastructure/database/engine.py`: engine psycopg; il
+  contesto del principal è `set_config` locale alla transazione, pulito a
+  commit/rollback senza residui nel pool (§7.3).
+- `src/newray/modules/identity/adapters/postgres.py`:
+  `PostgresUserRepository`/`PostgresSessionStore` implementano le porte.
+- Evoluzione porte (documentata): `UserRepository.add_user` ora restituisce
+  `bool` (inserimento atomico, False su owner esistente); `get_owner()`
+  rimosso (nessuna lettura senza scope); `SessionStore.get` sostituito da
+  `find_for_resolution` (verifica dell'ID presentato). Fake aggiornati allo
+  stesso contratto.
+- Test di integrazione (`backend/tests/integration/`): 3 test migrazioni
+  (schema/RLS/grant, separazione ruoli e grant minimi, downgrade) e 6 test
+  RLS su PostgreSQL reale con due principal nella stessa organizzazione,
+  organizzazione esterna, proprietario tabelle senza contesto (FORCE),
+  revoca immediata e ID di sessione presentato; ogni test usa un database
+  fresco migrato a head.
+- Verifica: `uv run pytest` 27/27 con i tre DSN `NEWRAY_TEST_*_URL` (18
+  offline + 9 integration); senza DSN, 18 passed/9 skipped. `uv run ruff
+  check .`, `uv run ruff format --check .`, `uv run mypy` puliti (23 file
+  sorgente).
+- Criterio di uscita coperto: `test_due_principal_stessa_organizzazione_sono_isolati`
+  (scope A non legge B e viceversa, adapter e SQL diretto),
+  `test_proprietario_tabelle_non_elude_rls` (FORCE),
+  `test_revoca_impedisce_subito_l_uso` (revoca),
+  `test_ruoli_separati_e_grant_minimi` (ruolo applicativo reale non
+  proprietario).
+- Limiti: nessun pooling di produzione né bind loopback configurato (A-07),
+  configurazione via variabili d'ambiente non ancora formalizzata in
+  settings (A-07), emission cookie rimandata alla route di A-04; le password
+  di `bootstrap.sql` sono solo per sviluppo locale.
+
+### Evidenze A-04 (16 settembre 2026)
+
+- API (`backend/src/newray/interfaces/http/`): `routes/identity.py` +
+  `dto/identity.py` (Pydantic solo al confine) — `POST /api/v1/session`
+  (bootstrap monouso, 201 + `Set-Cookie newray_session` HttpOnly,
+  SameSite=Lax, Path=/, Max-Age=2592000, Secure se configurato),
+  `GET /api/v1/me`, `POST /api/v1/session/revoke` (204 +
+  `delete_cookie`); `errors.py` traduce i DomainError in payload fisso
+  `{code, message, retryable, correlation_id}` con 401/403/409/500 e
+  correlation da `X-Request-ID` o uuid4 (§19.4).
+- `backend/src/newray/bootstrap/`: `api.py` (`create_app(service,
+  cookie_secure)` iniettabile per i fake, `build_app()` da `Settings`),
+  `wiring.py` (unico punto di composizione: adapter PostgreSQL +
+  SystemClock), `settings.py` (pydantic-settings, prefisso `NEWRAY_`,
+  `database_dsn` obbligatorio, bind 127.0.0.1:8000 di default),
+  `main.py` (entrypoint uvicorn).
+- Use case `IdentityService.current_user(principal)` per `/me`
+  (lettura in proprio scope; `SessionInvalid` se l'utente non esiste).
+- Web (`web/src/`): `app/` (provider + layout), `pages/IdentityPage.tsx`
+  (composizione), `features/session/` (query identità, bootstrap monouso,
+  revoca, pannello presentazionale con stati caricamento/autenticato/non
+  autenticato/conflitto/errore), `shared/api/client.ts` (cookie
+  same-origin, `ApiError` tipizzato), `shared/i18n` it/en a parità di chiavi.
+- Errori recuperabili (§19.4): 409 CONFLICT del bootstrap ripetuto mostra lo
+  stato "già inizializzato" con "Rileva la sessione"; 401 (UNAUTHENTICATED o
+  SESSION_INVALID, p.es. cookie già revocato ma ancora presentato) è
+  "non autenticato" non errore; 500 mostra il messaggio con retry.
+- Verifica backend: `uv run pytest` 38/38 con i tre DSN `NEWRAY_TEST_*_URL`
+  (28 offline + 10 integration, inclusi 10 contratti HTTP con fake e il
+  percorso completo su PostgreSQL reale); `uv run ruff check .`,
+  `uv run ruff format --check .`, `uv run mypy` puliti (33 file sorgente).
+- Verifica web: `npm ci --ignore-scripts` + `npm run check` — typecheck
+  strict, vitest 11/11 (5 panel presentazionale + 6 pagina con fetch
+  stubbato: identità, bootstrap 401, flusso 201, conflitto 409,
+  SESSION_INVALID 401, errore 500 con retry), build di produzione.
+- Smoke live su PostgreSQL reale (uvicorn + curl): bootstrap 201 con
+  cookie corretto, `/me` 200, bootstrap ripetuto 409 CONFLICT, revoca 204 +
+  cookie cancellato, `/me` con cookie revocato ancora presentato 401
+  SESSION_INVALID, senza cookie 401 UNAUTHENTICATED.
+- Criterio di uscita coperto: la catena UI → API → caso d'uso → dati è
+  verificata a tre livelli (vitest sul comportamento, contratti HTTP con
+  fake, integrazione API→PostgreSQL con RLS); errori recuperabili coperti
+  da test dedicati su entrambi i lati.
+- Limiti: CSRF protetto solo da SameSite=Lax + origine singola loopback
+  (l'hardening per arrivi da origini esterne entra con l'edizione ufficio,
+  G); i tipi web del contratto sono ancora manuali in
+  `features/session/types.ts` — A-05 li rigenera dai DTO backend in
+  `shared/contracts`; il test E2E Playwright nel browser nasce in B con i
+  primi flussi interattivi multi-pagina e il job CI a versioni bloccate
+  (§22.4) — decisione registrata in A-06; `uv.lock` senza metadata di
+  licenza (LGPL-2.1 psycopg già registrato in A-01 per §25.2).
+
+### Evidenze A-05 (16 settembre 2026)
+
+- `scripts/generate_contracts.py`: compone l'app FastAPI con i fake dei test
+  (senza database) ed esporta `app.openapi()` in `contracts/openapi.json`
+  (OpenAPI 3.1.0 — versione supportata dalla toolchain, §19.1 — rendering
+  deterministico a chiavi ordinate); genera
+  `web/src/shared/contracts/api.d.ts` con `openapi-typescript` 7.13.0 (MIT,
+  bloccata nel lockfile di `web/`, eseguita via `npm exec` locale). Usa
+  automaticamente l'ambiente uv del backend (ri-esecuzione) e fallisce con
+  messaggio chiaro se l'ambiente manca.
+- `--check`: rigenera in cartella temporanea e confronta byte a byte con i
+  file versionati (file-based, non git-diff); drift → exit 1, assenza →
+  exit 0. Verificato in entrambi i casi (drift introdotto artificialmente,
+  poi rigenerato).
+- Coerenza: `web/src/features/session/types.ts` non è più manuale —
+  re-esporta `components["schemas"]["IdentityDTO"]` e `Role` dal file
+  generato; la catena DTO Pydantic → OpenAPI → TypeScript è usata
+  dall'app e typecheckata.
+- Verifica: rigenerazione deterministica (due esecuzioni identiche byte a
+  byte); `uv run pytest` 39/39 con i DSN (nuovo test offline
+  `test_contratto_versionato_coerente_con_dto` in
+  `backend/tests/contracts/test_openapi_no_drift.py`, niente Node
+  necessario); `uv run ruff check .`, `uv run ruff format --check .`,
+  `uv run mypy` puliti; `npm run check` verde (typecheck sui tipi generati,
+  vitest 11/11, build).
+- Criterio di uscita coperto: OpenAPI/schema/TypeScript coerenti (stessa
+  fonte DTO, test offline del drift) e rigenerazione senza drift
+  (determinismo + `--check`, pronto per la CI di A-06).
+- Limiti: gli schemi JSON vivono dentro `openapi.json`
+  (`components/schemas`); i file JSON Schema autonomi e le fixture di
+  esempi nascono con i consumatori di eventi degli incrementi B/C.
+
+### Evidenze A-06 (16 settembre 2026)
+
+- `scripts/check_architecture.py` (solo standard library, analisi AST di
+  `backend/src/newray`): kernel pulito (niente framework né altri layer),
+  dominio/applicazione/ports/public senza FastAPI/Pydantic/SQLAlchemy né
+  dipendenze verso interfaces/infrastructure/bootstrap, adapter solo con
+  i driver DB, interfaces senza infrastructure, cross-modulo solo via
+  package pubblico `newray.modules.<x>`, bootstrap come unico root di
+  composizione, e nessun ciclo di import. Verificato: 33 file → exit 0;
+  negativi verificati uno per uno (cross-modulo privato, framework in
+  dominio, kernel→infrastructure, ciclo a due file → exit 1 con messaggio).
+- Web gate completo di §22.4: `npm run check` = format (Prettier 3.9.7,
+  config `.prettierrc.json`, contratti generati esclusi), lint (ESLint 10.10
+  + typescript-eslint 8.70, flat config; ha trovato e corretto un vero
+  difetto: assegnazione inutile in `shared/api/client.ts`), typecheck,
+  test vitest 11/11, licenze, build, budget bundle. Nuovi devDeps bloccati
+  (tutti MIT): eslint, @eslint/js, typescript-eslint, prettier, globals.
+- Licenze: `scripts/check-licenses.mjs` verifica l'intero lockfile
+  (336 pacchetti) contro l'allowlist permissiva, espandendo le espressioni
+  OR/AND; negativo verificato (licenza GPL-3.0 → exit 1). CC-BY-4.0 ammessa
+  per `caniuse-lite` con motivazione documentata (dati solo di sviluppo).
+- Budget bundle: `scripts/check-bundle.mjs` (JS 400 KB / CSS 64 KB; build
+  reale 302,8 / 2,3 KB) — superato → exit 1, alzare il budget richiede
+  decisione documentata.
+- `.github/workflows/ci.yml`: quattro job indipendenti — backend (uv
+  `sync --locked`, ruff check + format, mypy strict, pytest con servizio
+  `pgvector/pgvector:pg16` e ruoli creati da `bootstrap.sql`), web
+  (`npm ci --ignore-scripts` + `npm run check`), contratti
+  (`generate_contracts.py --check`), architettura
+  (`check_architecture.py`). YAML validato; ogni passo replicato e verde in
+  locale con gli stessi comandi (inclusa la sequenza del job contratti dal
+  root e `psql -f bootstrap.sql` con `ON_ERROR_STOP`).
+- Criterio di uscita coperto: confini import (script + negativi), lint,
+  tipi, test e build eseguiti realmente e verdi in questo ambiente.
+- Limiti: il workflow CI è dichiarativo — non eseguibile in questo
+  ambiente (niente GitHub Actions); la prima esecuzione reale avviene al
+  primo push su un host con Actions. L'E2E Playwright (`npm run e2e`)
+  passa in B con i primi flussi interattivi multi-pagina e il job dedicato
+  a versioni bloccate (§22.4): decisione che sostituisce l'anticipazione di
+  A-04; finché non c'è, la pagina identità resta coperta da vitest,
+  contratti HTTP e integration API→PostgreSQL.
+
+### Evidenze A-07 (16 settembre 2026)
+
+- `Settings` formalizza la convenzione (§21.2, §20.3): bind loopback di
+  default, un bind non-loopback richiede `NEWRAY_COOKIE_SECURE=true`
+  (nessuna esposizione remota su HTTP semplice), `NEWRAY_DATA_DIR`
+  obbligatoriamente assoluto (dati fuori dai sorgenti). Validazione live:
+  `NEWRAY_BIND_ADDRESS=0.0.0.0` senza TLS rifiuta l'avvio con messaggio
+  esplicito (verificato a processo reale, prima di servire).
+- Avvio unico documentato: `uv run python -m newray.bootstrap.main`
+  (bind/porta dai settings validati; sostituisce il precedente CLI
+  uvicorn `main:app` che li bypassava). Smoke live su PostgreSQL reale
+  (uvicorn vero, curl): readiness 401, bootstrap 201 + cookie, `/me` 200,
+  bootstrap ripetuto 409, revoca 204, `/me` post-rivoca 401; shutdown
+  pulito.
+- `deploy/compose.yaml`: composizione minima Linux — PostgreSQL/pgvector
+  (`pgvector/pgvector:pg16`, volume `db-data`, porta solo su loopback
+  dell'host, healthcheck) + API in host networking (socket sull'interfaccia
+  loopback, nessun bind non-loopback). Nessuna password predefinita:
+  `.env` da `.env.example` con valori casuali (`:?` fallisce se vuoti).
+  `deploy/Dockerfile` (Python 3.12 + uv 0.12.15, `uv sync --frozen
+  --no-dev`), `deploy/entrypoint.sh` (`alembic upgrade head` come ruolo
+  proprietario, poi l'API), `deploy/db-init/00-roles.sh` (ruolo
+  `newray_app` senza superuser/BYPASSRLS + estensione vector, prima
+  inizializzazione), `.dockerignore` di contesto.
+- Documenti: `docs/operations/runtime.md` riscritto con variabili lette
+  dall'app, avvio nativo, avvio compose, dati/backup/recupero e limiti;
+  `deploy/README.md` e `backend/README.md` aggiornati ai comandi reali.
+- Controlli: 49/49 backend (10 test nuovi sui settings, inclusi i negativi),
+  ruff + format + mypy puliti (33 file), `check_architecture.py` exit 0,
+  `docker compose config` valido (probe con `.env` sintetico in /tmp).
+- Criterio di uscita coperto: servizi minimi avviabili (smoke live), bind
+  loopback (default + validazione), dati separati dai sorgenti
+  (`NEWRAY_DATA_DIR` + volume nominato).
+- Limiti: il daemon Docker non è accessibile in questo ambiente —
+  `docker compose up`/build immagine non eseguiti qui, verificati con
+  `docker compose config` e replicazione manuale dei passi; la prima
+  esecuzione reale avviene sull'host di destinazione. Nessun reverse proxy
+  né TLS (fase loopback personale; l'ufficio richiede TLS, autenticazione
+  e configurazione esplicita, §20.3). `NEWRAY_CONFIG_FILE`,
+  `NEWRAY_PUBLIC_ORIGIN`, `NEWRAY_OLLAMA_BASE_URL` restano convenzioni
+  documentate, lette dai rispettivi incrementi (inference: B).
+
+Identità, scope, gateway e contratti estensioni iniziano in A/B. Il primo MCP
+concreto include installazione controllata e versioni bloccate. La memoria
+esplicita entra in B/C; l'estrazione automatica resta in H.
+
+## Secondo incremento: B — Assistente
+
+Criterio di uscita (tabella incrementi): chat con profilo/Ollama, stream,
+coda, stop e recupero; scope dati verificato. I dati arrivano dal profilo
+scelto dall'utente su Ollama (ADR 0003): nessun classificatore, nessun
+fallback invisibile. Alla chiusura iniziale di B-03 Ollama non era disponibile;
+il collegamento locale successivo è registrato in B-03.4. Le prove live
+restano opt-in (§22.2), i contratti si verificano con i fake.
+
+| ID | Attività | Stato | Verifica richiesta |
+| --- | --- | --- | --- |
+| B-01 | Conversazioni e messaggi: dominio, persistenza, API | Completato | Migrazione con RLS; CRUD conversazioni e messaggi in sequenza; scope con due principal su PostgreSQL reale — evidenze sotto la tabella |
+| B-02 | Profili e binding dei modelli | Completato | Risoluzione binding esplicito e snapshot riproducibile; `/profiles`, `/models`; errore recuperabile se il modello manca — evidenze sotto la tabella |
+| B-02.1 | Configurazione modello del profilo dalla WebUI | In corso | `POST /profiles/{id}/versions` con idempotenza e conflitto ottimistico, UI di switch nella WebUI; manca il provisioning esplicito iniziale (`POST /profiles/defaults`) — dettaglio nel piano integrato |
+| B-02.2 | Stato runtime e catalogo comprensibile dalla WebUI | Da fare | Contratto generato distingue non configurato, irraggiungibile, catalogo vuoto e modelli disponibili; recupero UI e stato installed/compatible/qualified onesto; completa il residuo catalogo di B-03.2-10 |
+| B-03 | Adapter Ollama per la porta `ChatModel` | Completato | Stream contenuti, cancellazione, limiti ed errori tipizzati; suite di contratto con fake; live opt-in con modello e digest dichiarati — evidenze sotto la tabella |
+| B-03.2 | **PRIORITARIO — consolidamento dopo code review** | In corso | Chiudere i difetti e i gate dettagliati sotto; precedenza su B-04. Le chiusure storiche A/B non qualificano i casi scoperti dalla revisione |
+| B-03.3 | Migrazione frontend a Tailwind CSS + shadcn/ui | Completato (21/09) | ADR 0005; UI migrata (Tailwind v4 CSS-first + 6 primitive shadcn in `shared/ui`), accessibilità/i18n/contratti/gate preservati; 21 vitest + 18 e2e verdi, bundle 352.7/22.4 KB — evidenze nella sezione dedicata |
+| B-03.4 | Collegamento dei GGUF locali a Ollama e verifica nell'app | In corso — smoke 4/4, qualifica 1/4 | Quattro modelli da /mnt/backup/llm/models, import ripetibile, script operativi, digest e prove reali di caricamento; nessun download dei pesi. Il 22/09 tutti e quattro sono stati caricati con `done_reason=stop`; solo `base` conserva una qualifica sul workflow, gli altri smoke non diventano qualifiche — evidenze sotto e [rapporto del 17 settembre](evidence/local-models-qualification-2026-09-17.md) |
+| B-04 | Run: creazione, stati, snapshot e recupero | Da fare | Stati `queued/running/completed/failed/cancelled/interrupted`; snapshot profilo+modello; alla ripartenza un run interrotto non è concluso |
+| B-05 | Worker e coda | Da fare | Claim atomico, lease e fencing; coda limitata; una generazione attiva alla volta |
+| B-06 | Stream eventi SSE e reducer web | Da fare | Envelope con sequenza; replay/deduplicazione, snapshot a cursore scaduto; reducer tollerante ai duplicati |
+| B-07 | Stop e cancellazione | Da fare | `/runs/{id}/cancel` idempotente; propagazione a inference; le azioni già avvenute restano visibili |
+| B-08 | WebUI conversazioni integrata | In corso — preview inline | B-08.1, B-08.2 e B-08.8 completate (23/09, trasporto mock); B-08.3/4/5 hanno parti visibili dal 22/09 (storia semplice, profilo, composer inline), ma restano i criteri durevoli, configurazione modello persistente e parser/stream B-08.6–7 |
+| B-09 | E2E Playwright e verifica finale scope | In corso | 43 scenari UI mock verdi il 23/09; B-03.2-33 chiuso con diagnosi reale e prova sincrona (`requestSubmit()`×2). B-09.2 ha una preview mock, non browser→API→PostgreSQL né run durevole; B-09.3 resta live |
+
+Ordine: B-01 è il terreno dati; B-02/B-03 preparano l'inference. **B-03.2 è
+un intervento prioritario e un gate prima di B-04**, su richiesta dell'utente
+del 17 settembre. B-03.4 verifica subito il runtime locale richiesto, senza
+chiudere implicitamente il consolidamento. B-03.3 precede B-08; B-04/B-05/
+B-06/B-07 compongono il run, B-08 la UI e B-09 la verifica trasversale.
+
+Il piano integrato sotto precisa questo ordine: shell e CRUD già supportati
+possono essere consegnati prima del run, dopo i rispettivi prerequisiti;
+le prove browser della sessione non aspettano B-08. Il gate completo B-03.2
+prima di B-04 resta invariato.
+
+<a id="piano-integrazione-webui"></a>
+### Piano integrato funzioni e WebUI — revisione 22 settembre 2026
+
+Richiesta: trasformare le capacità sviluppate in workflow visibili e completi,
+con chat e scelta del modello, evitando di contare come consegnata una funzione
+presente soltanto nel backend. Questa sezione è parte del ledger unico:
+usa gli ID esistenti, dettaglia i loro sottointerventi e introduce soltanto
+i contratti mancanti B-02.1/B-02.2 e i correttivi 34–36 emersi dalla preview
+chat. Le corsie backend e frontend sono separate, con criteri condivisi di
+consegna; per il consolidamento valgono gli stati delle tabelle B-03.2. Le
+caselle marcate indicano solo sottoparti già verificate, non chiusure
+automatiche del ticket contenitore.
+
+#### Inventario verificato nel codice
+
+| Percorso utente | Backend effettivamente presente | WebUI effettivamente presente | Lavoro necessario |
+| --- | --- | --- | --- |
+| Prima inizializzazione e sessione | `POST /session`, `POST /session/login`, `GET /session/status`, `GET /me`, `POST /session/revoke` | `/` e `/login`, bootstrap/login/sessione ed errori | Completare recovery legacy, normalizzazione/hardening e affidabilità browser; separare area di lavoro dalla scheda account |
+| Conversazioni | Lista/creazione/lettura/rinomina/cancellazione, RLS e cursori | Lista, creazione, apertura, rinomina, eliminazione con conferma, cursori (23/09, trasporto mock) | B-08.2: manca la prova browser→API→PostgreSQL reale (B-09.1/B-09.2) e la migrazione ai tipi generati |
+| Cronologia messaggi | Lettura paginata e append idempotente; la preview inline aggiunge messaggi senza idempotenza coordinata | Transcript plain-text fino a 200 messaggi e composer inline | B-08.3: cursori/dedup/rendering sicuro; B-08.5 migra al run coordinato |
+| Profili | `GET /profiles` e binding con snapshot/versioni | Selettore manuale dei soli profili con modello e nome modello visibile | B-08.4 è parziale: manca modifica persistente e snapshot del run |
+| Modelli | `GET /models`, catalogo Ollama e configurazione iniziale da ambiente | Nessun catalogo/editor/stato runtime | B-02.1/B-02.2 + B-08.4: provisioning, stati distinti, scelta e salvataggio |
+| Risposta generativa | `POST /conversations/{id}/run` genera inline via `ChatModel`, salva atomicamente solo il successo e non crea un run durevole | Stream visibile; B-03.2-35 (23/09) corregge il parser: terminali `stop`/`length`/`cancelled`/vuoto/`error`/EOF distinti, meter token/s autorevole | B-03.2-34/35/36 hanno corretto server e consumer; B-04–B-07 e B-08.5/6 restano il percorso finale (reducer durevole/riconnessione) |
+| Documenti, elaborati, internet, email/calendario | Specifica e candidati; nessun modulo applicativo corrispondente in questa copia | Nessuna pagina | Incrementi C–F, da costruire come percorsi completi |
+| Estensioni, memoria e amministrazione ufficio | Pianificati G/H; ruolo account e scope sono già fondamenta | Nessuna area | Incrementi G/H, senza considerarli capacità già disponibili |
+| Avvio locale | `.start` e supervisore PostgreSQL/API/Vite; Ollama opzionale configurato | Apre il solo prodotto oggi implementato | Lo smoke di avvio non equivale a chat pronta |
+
+Riscontri: `web/src/app/App.tsx`, `web/src/pages/ConversationsPage.tsx`,
+`web/src/features/{session,chat}/`, `backend/src/newray/interfaces/http/routes/`,
+`modules/{identity,conversations,profiles,models}/`, `contracts/openapi.json`.
+Il login ora consente il rientro con credenziale; il recupero per gli owner
+legacy senza hash è soltanto segnalato, non implementato. Il selettore lingua
+IT/EN, l'italiano iniziale e `html.lang` dinamico sono invece completati in
+B-03.3/B-08.1; non sono più un residuo.
+
+Rilievo riaperto: `EmptyModelCatalog` e `OllamaModelCatalog` su
+`NetworkUnreachable` restituiscono entrambi `[]`. La WebUI non può distinguere
+assenza di configurazione, runtime spento e catalogo davvero vuoto. Il residuo
+di B-03.2-10 va chiuso con B-02.2; le correzioni stream già provate restano valide.
+
+#### Percorso di consegna e dipendenze
+
+| Ordine | Consegna visibile | Ticket e prerequisiti | Prova di uscita |
+| --- | --- | --- | --- |
+| 1 | Prestazioni visibili senza falsi terminali | B-03.2-34 backend → B-03.2-35 frontend | Token/s dal runtime, parser `done/error` corretto, troncamento e guasti visibili |
+| 2 | Preview contenuta e verificabile | B-03.2-36 + riapertura 11 | **Completato 22/09:** nessun fallback Echo, prompt orfano o I/O DB nel loop; contract/integration test della route |
+| 3 | Conversazioni e sessione affidabili | B-08.2/3, B-03.2-22/14/26/33, B-09.1 | CRUD/storia reali; bootstrap→logout→login, recovery, due identità e cache isolata |
+| 4 | Modello configurabile senza variabili manuali | B-02.1/B-02.2 → B-08.4 | Scegliere profilo/modello, salvare, ricaricare e vedere lo stesso binding/stato |
+| 5 | Gate di consolidamento completo | Tutti i residui B-03.2 | Gate tecnici/SQL/browser chiusi con evidenze; B-04 rimane dopo questo punto |
+| 6 | Prima chat persistente e interrompibile | B-04/B-05 → B-08.5 → B-06/B-07 → B-08.6 | Prompt → run → risposta; stop, replay e riavvio senza duplicati |
+| 7 | Primo uso locale qualificato | B-09.2/B-09.3 e B-03.4 | Browser→backend→DB→Ollama reale, digest, metriche e limiti dichiarati |
+| 8 | Lavori documentali e integrazioni | C → D/E → F, poi G/H | Ogni incremento alterna contratto backend e consumer frontend con prova integrata |
+
+Correzione di sequenza: B-03.2 richiede prove browser, ma B-09 era previsto
+solo dopo B-08, che dipende dal run successivo al gate. **B-09.1 introduce
+subito il runner e i test di sessione**, sostituendo quel rinvio; B-09 resta
+aperto fino alle prove complete. Non si attende una chat pronta per testare
+logout e rientro. Nessun altro gate viene rimosso e nessuna data è promessa.
+
+<a id="todo-backend"></a>
+#### TODO backend — contratti, dati, sicurezza e runtime
+
+**B-03.2-34 — completato: telemetria token/s autorevole**
+
+- [x] Owner `models` per la misura vendor e owner transitorio `runs` per
+  l'esito preview: `Completion` contiene la durata di sola generazione
+  restituita dal runtime (`eval_duration`, normalizzata in nanosecondi),
+  conteggio output e throughput. La persistenza durevole è rinviata a B-04.
+- [x] Calcolare `tokens_per_second = completion_tokens / eval_duration_s`
+  soltanto quando entrambi sono validi e la durata è positiva. Non stimare
+  token dal testo, non usare il tempo HTTP totale e non includere load o
+  prompt-evaluation: la UI deve sapere cosa sta mostrando.
+- [x] Nella preview inline aggiungere la metrica al terminale `done`; nel run
+  B-04 portare gli stessi campi nell'evento/snapshot persistito, così refresh
+  e replay non ricalcolano valori diversi. Runtime che omette la misura →
+  `null`/«non disponibile», mai zero inventato. La metrica è dato del run,
+  scoped allo stesso principal; nessun effetto o telemetria esterna.
+- [x] Accettazione preview: fixture Ollama con conteggio/durata validi, nulli, zero e
+  tipi errati; unità e arrotondamento deterministici; test HTTP terminale e
+  codegen senza drift; prova Ollama reale con digest dichiarato. Nessun prompt
+  o contenuto nei log metrici. La conservazione nello snapshot/evento durevole
+  resta criterio di B-04/B-06, perché quel modello dati non esiste ancora.
+
+**B-03.2-36 — completato il contenimento; sostituzione in B-04/B-05**
+
+- [x] Proprietario `runs`; la route HTTP resta solo trasporto e usa le
+  API pubbliche di conversations/profiles/models. Principal e scope arrivano
+  dalla sessione server; prompt, output, metriche e ricevute sono dati privati.
+- [x] Dichiarare esplicitamente `POST /conversations/{id}/run` come superficie
+  transitoria, compatibile soltanto finché B-04/B-05 non la sostituiscono.
+  Rimuovere `EchoChatModel` dal wiring di produzione: runtime non configurato,
+  irraggiungibile o modello assente sono errori distinti e recuperabili, mai
+  una risposta sintetica invisibile. Il fake Echo resta iniettato solo nei test.
+- [x] Evitare prompt orfani: validare conversazione/profilo/modello prima
+  della scrittura e coordinare prompt+esito tramite idempotenza/ricevuta;
+  errori, `length`, cancel e disconnessione conservano stato/output onesto.
+  La soluzione transitoria non deve creare un secondo modello di persistenza
+  incompatibile con B-04.
+- [x] Applicare una policy di budget §8.2 dichiarata a cronologia e risposta;
+  non usare `limit=200` come taglio invisibile. Tutte le operazioni PostgreSQL
+  della route async sono offloadate come blocchi interi o rese async: questa
+  regressione riapre B-03.2-11.
+- [x] Aggiungere test backend di contratto con `ChatModel` controllato per
+  modello assente, errore mid-stream, EOF e cancel; test integration/RLS con
+  due principal su PostgreSQL per successo, idempotenza e `length`. I mock
+  Playwright non provano route, DB, cancellazione del generatore o isolamento.
+
+**B-03.2-14/15/22/29/30/31/32 — identità e migrazioni**
+
+- [x] Login con credenziale e nuova sessione, status installazione e migrazione
+  0005 presenti. Le prove offline e PostgreSQL di login sono state ripetute;
+  questo non chiude recupero, hardening o l'intera suite delle migrazioni.
+- [x] Owner `identity` (23/09): recupero locale via comando CLI dedicato
+  (`uv run python -m newray.bootstrap.recover_credential --name "..."`),
+  mai un percorso web — l'autorità è l'accesso locale al processo/DB, il
+  nome è solo la chiave di lookup. Nuova password richiesta due volte via
+  `getpass` (mai un argomento in chiaro: finirebbe nella cronologia della
+  shell). `IdentityService.recover_owner_credential`: preserva user/org ID
+  (stesso `find_owner_by_display_name` + `update_credential_hash`, mai
+  ricreazione dell'owner né reset del DB), revoca tutte le sessioni
+  esistenti (`SessionStore.revoke_all_for_user`, nuovo). Owner sconosciuto
+  → `NotFound`; credenziale nuova troppo debole → `InvalidCredentials`.
+  **Difetto reale trovato scrivendo l'integration test**: l'adapter
+  Postgres di `update_credential_hash` (usato anche dal rehash PBKDF2→
+  Argon2id su login, B-03.2-32) impostava solo il flag `app.owner_lookup`
+  (autorizza esclusivamente la SELECT pre-auth) e MAI i GUC di scope
+  richiesti dalla policy generale `users_isolation` per l'UPDATE — su
+  PostgreSQL reale l'aggiornamento colpiva sempre 0 righe, mai segnalato
+  perché il rowcount non era controllato. Mai stato la causa di un
+  incidente noto (il rehash PBKDF2 è un percorso raro), ma sarebbe stato
+  lo stesso destino silenzioso per questo recupero. Corretto: la porta ora
+  richiede uno `Scope` (non il solo `user_id`), l'adapter usa
+  `_set_scope_context`, e un `rowcount == 0` solleva `RuntimeError`
+  esplicito invece di un successo apparente — vale per entrambi i
+  chiamanti (login e recupero).
+- [x] B-03.2-30/31/32 completati il 22/09: normalizzazione/migrazione owner,
+  anti-enumerazione deterministica e pwdlib/Argon2id con rehash PBKDF2. Il
+  semplice errore `CREDENTIAL_NOT_SET` resta comunque non eseguibile.
+- [x] B-03.2-29: fixture 0003 resa storica e suite PostgreSQL completa verde;
+  nessuna migrazione di produzione alterata per assecondare l'adapter head.
+- [x] B-03.2-15: validazione/envelope/correlation ID/retryable uniformati e
+  contratti rigenerati il 22/09.
+- [x] B-03.2-22: scope/RLS applicati a organizations e revoche; principal e
+  ACL restano sempre risolti dal server.
+- [x] Accettazione (23/09): bootstrap→logout→login con gli stessi dati,
+  recupero di un owner legacy senza hash e di uno con password dimenticata,
+  revoca di tutte le sessioni dopo il recupero, isolamento da un principal
+  di un'altra organizzazione — tutto su PostgreSQL reale
+  (`test_rls_identity.py`, 4 test nuovi) più il comando CLI end-to-end
+  (`test_cli_recover_credential.py`, 2 test nuovi) e 8 test unit
+  (`test_identity_application.py`). 362 test backend verdi, ruff/mypy/
+  architettura/contratti verdi. Casi UI (guida operativa nel pannello
+  login) restano nella corsia frontend, non in questo ticket.
+
+**B-02.1 — operazioni backend mancanti per la configurazione da UI**
+
+- [x] Owner `profiles`, porta pubblica del catalogo `models`, DTO HTTP: caso
+  d'uso per creare una nuova versione/binding di un profilo autorizzato.
+  Endpoint implementato e generato: `POST /profiles/{id}/versions`
+  (23/09, `ProfileService.switch_model`, migration 0008). `POST
+  /profiles/defaults` (provisioning esplicito iniziale) resta da fare,
+  vedi bullet successivo.
+- [ ] Risolvere il problema della prima installazione: oggi `GET /profiles`
+  tenta il seeding e richiede `NEWRAY_DEFAULT_MODEL_NAME`. Definire risposta
+  non configurata utilizzabile dalla UI e provisioning esplicito; evolvere
+  il contratto con compatibilità dichiarata, senza azzerare profili esistenti.
+- [x] Richiesta con riferimento modello selezionato, versione profilo attesa
+  e chiave idempotente. Il server verifica scope, modello disponibile e
+  digest; non accetta endpoint/path/privilegi dal browser (23/09).
+- [x] Salvare atomicamente binding e versione nuovi; stessa chiave/payload
+  riproduce l'esito, payload differente o versione obsoleta genera conflitto
+  (`profile_version_switches`, vincolo UNIQUE come barriera di concorrenza:
+  `profiles`/`model_bindings`/`profile_versions` restano senza grant UPDATE,
+  0003). Non riscrive versioni storiche (23/09).
+- [x] Aggiornato DTO/client tramite codegen (`SwitchProfileModelRequest`,
+  contratti senza drift). Test due principal, concorrenza reale su
+  PostgreSQL (due switch paralleli, una sola vince), modello rimosso e
+  retry idempotente: unit (`test_profiles_application.py`), contract
+  (`test_http_profiles.py`), integration/RLS (`test_api_profiles.py`,
+  `test_rls_profiles.py`) — 24 test nuovi, 347 totali verdi (23/09).
+  Manca ancora backfill/migrazione per il provisioning del bullet
+  precedente.
+
+**B-02.2 + residuo B-03.2-10 — disponibilità del runtime**
+
+- [ ] Owner `models` + bootstrap/HTTP: esporre uno stato autenticato distinto
+  per runtime non configurato, irraggiungibile, pronto senza modelli e pronto
+  con modelli. Proposta additiva `GET /models/status`; gestire separatamente
+  timeout/schema invalido. Nessuna URL privata o credenziale nel payload.
+- [ ] Riutilizzare il catalogo reale e rendere tipizzato il guasto oggi
+  convertito in `[]`. Testare gli stati con trasporto controllato e sul
+  runtime configurato nella prova opt-in; nessun controllo solo browser.
+- [ ] Collegare le evidenze di capacità/qualifica dove disponibili: Ollama
+  oggi restituisce `installed` e capacità vuote. Non dedurre `qualified` o
+  supporto strumenti/visione dal nome del modello o dalla sola importazione.
+
+**B-04 — creazione run, stati e snapshot (dopo gate B-03.2)**
+
+- [ ] Owner `runs`, porte pubbliche conversations/profiles: definire
+  `POST /conversations/{id}/runs`, con creazione coordinata di messaggio e
+  run, idempotenza scoped e snapshot profilo/versione/binding/digest.
+  Niente due POST indipendenti che lascino prompt orfani o duplicati.
+- [ ] Definire l'unità transazionale attraverso porte, stati durevoli
+  queued/running/completed/failed/cancelled/interrupted, `GET /runs/{id}`,
+  output parziale e causa terminale conservati, migrazioni e DTO generati.
+- [ ] Definire limiti totali durata/token/turni: length è troncamento,
+  EOF/errore/testo vuoto non è completamento riuscito; nessun fallback.
+- [ ] Accettazione: riconciliazione sulla stessa chiave dopo timeout non crea
+  un secondo run; snapshot dopo refresh e isolamento fra principal verificati.
+
+**B-05 — worker e launcher**
+
+- [ ] Owner scheduler/runs/bootstrap: claim atomico, lease/fencing, coda
+  limitata e una generazione per GPU; comporre ChatModel con lo snapshot
+  persistito e scrivere output/stato tramite porte autorizzate.
+- [ ] Estendere `.start` ad avvio/riuso/readiness/shutdown del worker
+  quando esiste. API pronta e worker spento non significa chat pronta;
+  esporre uno stato consumabile dalla UI, senza segreti o endpoint privati.
+- [ ] Lease scaduti e riavvio producono run interrotti e recuperabili, non
+  rigenerazioni cieche; deadline totale anche con chunk continui e gestione
+  contesa GPU esterna. Due worker non ottengono lo stesso claim.
+- [ ] Accettazione: coda piena tipizzata, processo terminato e riavviato,
+  persistenza dell'esito e limiti misurati; consumer B-08.5/6.
+
+**B-06 — eventi SSE e replay server**
+
+- [ ] Owner runs/events: `GET /runs/{id}/events`, envelope versionato,
+  sequenza, persistenza coerente, replay, snapshot a cursore scaduto e
+  backpressure limitata. ACL a sottoscrizione, replay e dopo revoca.
+- [ ] Accettazione: terminale unico, cursore recuperabile e due principal
+  isolati su PostgreSQL; il reducer web è una consegna distinta B-08.6.
+
+**B-07 — cancellazione server**
+
+- [ ] `POST /runs/{id}/cancel` idempotente/autorizzato; richiesta persistita,
+  osservata dal worker e propagata ad `aclose`. Conservare output parziale;
+  gestire race completamento/stop e revoca, anche dopo riavvio.
+- [ ] Effetti già avvenuti restano nelle ricevute; esito incerto richiede
+  riconciliazione, non retry cieco. Nessuna generazione dopo cancel confermato.
+
+**B-03.2-16 — ciclo strumenti e gateway**
+
+- [ ] Tool call/result sullo stesso modello, capability e cancellazione,
+  gateway e policy server-side prima degli effetti. Un primo run testuale
+  dichiara strumenti indisponibili, senza simulare lettura file o rete.
+- [ ] Accettazione: tool ignoto negato, approvazione legata agli argomenti
+  senza ampliare ACL, revoca prima dell'effetto e ricevute reali. Fonti e
+  download ricontrollano l'accesso; consumer e UI arrivano con C–F/B-08.7.
+
+<a id="todo-frontend"></a>
+#### TODO frontend — navigazione e funzioni utilizzabili
+
+**B-03.2-35 — Completato 23/09: parser SSE e meter token/s**
+
+- [x] Sostituito il parsing riga-per-riga di `useChat.ts` con un decoder SSE
+  (`shared/api/sse.ts`) che associa `event`, `data` e frame anche quando
+  chunk di rete spezzano righe/eventi. Terminale unico validato in
+  `streamReducer.ts`; `done.finish_reason`, `error`, EOF prematuro e abort
+  hanno stati distinti (`completed`/`truncated`/`cancelled`/`empty`/`failed`/
+  `eof`/`aborted`).
+- [x] Meter locale «token/s» vicino alla risposta (`formatTokenRate`):
+  «misura in corso…» durante lo stream, poi esclusivamente la metrica
+  autorevole di B-03.2-34 o «non disponibile». `length` appare come
+  troncata, non come `stop`; un errore SSE conserva il testo parziale.
+- [x] Il meter usa lo snapshot del terminale `done` (modello/digest inclusi),
+  mai un timer del browser né il profilo selezionato dopo l'avvio.
+- [x] Accettazione: 10 Vitest su `sse.ts`, 12 su `streamReducer.ts`, 7
+  Playwright (`e2e/ui/chat-sse.spec.ts`: frame spezzati, `stop`, `length`,
+  terminale vuoto, errore dopo delta, EOF senza terminale, abort locale)
+  — tutti verdi. Refresh/replay dopo B-04 resta da riverificare quando il
+  run durevole esiste.
+
+**B-03.2-13/14/26/28/33 — sessione e client**
+
+- [x] Bootstrap, route `/login`, redirect per installazione inizializzata,
+  errori e hint `CREDENTIAL_NOT_SET` presenti. Non riprogettare da zero
+  ciò che esiste; non confondere il suggerimento con un recovery disponibile.
+- [x] B-03.2-33 (23/09): diagnosi reale, non solo suite verde. Causa
+  individuata sperimentalmente: `BootstrapPanel`/`LoginPanel`/`SettingsPanel`
+  disabilitavano il pulsante solo tramite `isPending` (stato React, un
+  render dietro l'evento nativo) — due submit nello stesso tick lo leggono
+  entrambi `false`. Guardia sincrona (`useRef`) nel gestore dell'evento
+  stesso, aggiornata a ogni render (nessun array di dipendenze: un mutate
+  che risolve prima del prossimo commit osservabile farebbe saltare la
+  transizione a un effetto gated su `[isPending]` — riprodotto e corretto).
+  Prova: `page.evaluate` con due `form.requestSubmit()` sincroni (vero
+  doppio invio nello stesso task del browser, non due `.click()` di
+  Playwright con round-trip separati che non riproducevano la razza).
+- [ ] Parte UI di 14: dopo il contratto di recupero backend, guida operativa
+  IT/EN verificabile per owner legacy e scadenza; mai suggerire reset DB.
+  Dopo login entrare in `/conversations` quando B-08.1 è disponibile;
+  identità/logout in impostazioni, route protette solo come UX.
+- [x] Parte UI di 13/26 (23/09): pending/errori di bootstrap/login/revoca,
+  focus accessibile già presenti; doppi click/Enter ora bloccati dalla
+  guardia sincrona sopra. Revoca incerta non presentata come logout riuscito
+  (comportamento preesistente, invariato).
+- [x] B-03.2-26 (23/09): `useRevoke` cancella le query in volo
+  (`queryClient.cancelQueries()`) prima di `clear()` — una risposta tardiva
+  non può più ripopolare la cache dell'identità appena disconnessa.
+  `useChat` interrompe lo stream sull'unmount (navigazione/logout durante
+  uno streaming non lascia la richiesta aperta).
+- [x] Client con timeout/AbortSignal (23/09): `apiFetch` compone un
+  `AbortSignal.timeout` con l'eventuale segnale del chiamante via
+  `AbortSignal.any`; soglia dichiarata `DEFAULT_TIMEOUT_MS` (15s),
+  overridabile per i test. 401 coordinato: `QueryCache`/`MutationCache`
+  globali (`App.tsx`) invalidano l'identità su qualunque 401 protetto, non
+  solo `/api/v1/me` — prova con un 401 sulla creazione di una conversazione
+  che riporta a `/login`. Error boundary React aggiunto (`ErrorBoundary.tsx`,
+  fallback recuperabile con retry); 404 già presente (`NotFoundPage`).
+  Nessun retry automatico di mutazioni incerte (invariato); nessun token/
+  cronologia in localStorage (invariato, verificato).
+- [ ] Resta da fare: correlation ID non ancora visibile nei payload di
+  errore mostrati in UI (solo nel corpo della risposta); envelope di 15
+  non riverificato in questo giro.
+- [x] Accettazione (23/09, trasporto mock): 7 test Vitest nuovi (timeout
+  `apiFetch`, abort esplicito non riclassificato come timeout, 3× doppio
+  invio sincrono, 3× ErrorBoundary) + 2 Playwright nuovi (401 mid-uso su
+  chiamata protetta → `/login`, doppio `requestSubmit()` sincrono). Tutti
+  verificati anche in negativo (fix temporaneamente rimosso → test rosso)
+  per escludere falsi positivi. `npm run check` verde, 37/37 e2e UI verdi.
+  RLS/API già testate nel backend (B-02/B-03.2-22).
+
+**B-03.3 + B-08.1 — sistema visivo e navigazione**
+
+- [x] Owner `web/shared/ui`, `app`, `pages`: completare Tailwind/shadcn secondo
+  ADR 0005, con lock/licenze e componenti necessari; riusare il comportamento
+  sessione, eliminare gli stili sostituiti e verificare tastiera/focus.
+  (21/09: Tailwind v4 CSS-first + 6 primitive shadcn in `shared/ui`,
+  `tokens.css`/`App.module.css`/`IdentityPanel.module.css` rimossi,
+  637 pacchetti licenze ok.)
+- [x] Realizzare shell desktop/mobile: conversazioni laterali, area centrale,
+  selettore profilo nel contesto della conversazione, accesso a impostazioni.
+  Navigazione primaria coerente: Conversazioni, Documenti, Elaborati,
+  Collegamenti; le capacità future non hanno pulsanti operativi fittizi.
+  (21/09: `Shell.tsx` sidebar desktop + top bar mobile con menu accessibile;
+  il selettore profilo resta in B-08.4, nel contesto della conversazione.)
+- [x] Definire `/conversations`, `/conversations/:id`, `/settings`; aggiungere
+  le route di Documenti/Elaborati/Collegamenti quando il relativo workflow
+  esiste. Una voce non disponibile può indicarne chiaramente lo stato, senza
+  moduli vuoti o false promesse di upload/esportazione/invio.
+  (21/09: route definite, `RequireSession` per UX; le tre capacità future
+  sono voci non cliccabili con stato "in corso".)
+- [x] Selettore lingua IT/EN, italiano iniziale coerente con la specifica,
+  `html.lang` e date aggiornati; preferenza non sensibile persistibile.
+  Prove mobile, focus dopo navigazione, refresh su URL profondo e 404.
+  (21/09: `LanguageSelect` + provider i18n; e2e `navigation.spec.ts` copre
+  refresh profondi, 404, lingua, focus post-navigazione, menu mobile.)
+- [x] Accettazione: una sessione autenticata entra nell'area di lavoro, non
+  termina nella scheda account; nessun link attivo porta a un percorso morto.
+  (21/09: bootstrap/login → `/conversations`; logout da `/settings`; 18 e2e
+  verdi, 21 vitest verdi, `npm run check` verde.)
+
+**B-08.8 — PRIORITARIO: area di concentrazione e pannello destro modulare**
+
+Richiesta utente del 23/09: la pagina attuale mescola conversazioni, profilo,
+catalogo modelli e chat nella superficie che dovrebbe restare dedicata al
+contenuto. Riorganizzare la shell con una gerarchia simile al riferimento
+OpenClaw: centro calmo e dominante, controlli raccolti in una superficie
+laterale coerente. Per questa consegna il testo della richiesta è autorevole
+sul posizionamento: il pannello delle opzioni è **a destra** su desktop.
+
+- [x] **Owner e confini.** Owner `web/app` per la composizione della shell e
+  `web/shared/ui` per le sole primitive generiche. Ogni feature espone il
+  proprio pannello da un'API pubblica (`features/<feature>/index.ts`); `app`
+  non importa componenti interni e le feature non si importano fra loro.
+  Nessun nuovo modulo backend, tabella, evento o endpoint in questa slice.
+- [x] **Contratto di composizione.** Introdurre un registro tipizzato e
+  statico dei pannelli con almeno `id`, chiave i18n, icona locale, ordine,
+  stato di disponibilità e renderer. ID univoci e ordine deterministico.
+  Il registro compone codice revisionato già incluso nel bundle: non carica
+  componenti, prompt o script indicati dal backend e non diventa un sistema
+  plugin anticipato. Aggiungere una feature futura deve richiedere una nuova
+  registrazione esplicita, non modifiche sparse alla pagina conversazioni.
+- [x] **Layout desktop.** Riservare il centro al transcript/contenuto corrente
+  e al composer pertinente, con larghezza leggibile e nessun catalogo o
+  gestione account sovrapposti. Spostare nel pannello destro: elenco e azioni
+  conversazioni, scelta profilo e configurazione modello. Il pannello ha rail
+  di sezioni riconoscibili, una sola sezione espansa alla volta, può essere
+  compresso senza perdere il contenuto centrale e non copre il composer.
+  Impostazioni account restano sulla route `/settings`, non diventano un
+  duplicato nel workspace.
+- [x] **Responsive e accessibilità.** Su schermi stretti il pannello diventa
+  un drawer/modal non persistente, con trigger nominato, focus iniziale,
+  focus trap, `Escape`, ripristino del focus e chiusura dopo la navigazione
+  quando pertinente. Ordine tastiera e landmark (`main`, navigazione,
+  pannello complementare) devono essere stabili; contrasto, target touch e
+  riduzione del movimento riusano i token e le primitive ADR 0005.
+- [x] **Stato e principal.** Conversazioni, profili e modelli restano cache
+  server scoped all'identità; logout/cambio identità chiudono pannelli,
+  stream e cache private. Non salvarli in `localStorage`. È ammesso salvare
+  soltanto una preferenza non sensibile e versionata (pannello compresso o
+  sezione preferita), con default sicuro. Mostrare/nascondere una sezione non
+  concede privilegi: ACL, scope e disponibilità restano server-side.
+- [x] **Stati reali, nessuna falsa funzione.** Ogni pannello possiede loading,
+  vuoto, errore e recupero. Documenti, Elaborati, Collegamenti e feature
+  successive non ricevono componenti vuoti né azioni simulate: possono
+  apparire soltanto come indisponibili/non interattive, oppure essere aggiunte
+  quando la relativa vertical slice ha contratto e consumer reali.
+- [x] **Migrazione controllata.** Estrarre da `ConversationsPage.tsx` la
+  composizione laterale senza riscrivere query, mutation, reducer SSE o
+  contratti B-02.1/B-08.2. Conservare URL profondi
+  `/conversations/:id`, selezione attiva, cursori, conflitti, conferma di
+  cancellazione e stato dello stream. Nessun secondo design system e nessuna
+  modifica manuale ai contratti generati.
+- [x] **Criteri di accettazione.** (1) A 1440 px il centro contiene soltanto
+  il lavoro attivo e il pannello destro contiene le tre sezioni reali;
+  (2) comprimere/riaprire il pannello non rimonta o perde chat, selezione o
+  bozza; (3) cambio conversazione da pannello aggiorna URL e contenuto;
+  (4) cambio profilo/modello conserva pending, 409 e refetch già previsti;
+  (5) a 375 px drawer e composer non si sovrappongono e il percorso è
+  completabile solo da tastiera; (6) logout durante stream chiude drawer,
+  stream e dati privati; (7) una registrazione duplicata fallisce in test.
+- [x] **Prove richieste.** Test unit/component del registro e della shell;
+  Playwright desktop/mobile per apertura, focus, deep-link, conversazione,
+  profilo/modello, errore e logout durante stream; snapshot visivi locali
+  alle due viewport solo come regressione di layout, non come sostituto degli
+  assert comportamentali. `npm run check`, `npm run e2e`, budget bundle e
+  parità chiavi it/en verdi. B-09.1/B-09.2 conservano separatamente la prova
+  browser→API→PostgreSQL reale.
+
+**Esito 23/09 — completato nel perimetro WebUI.** `web/src/app/WorkspacePanel.tsx`
+e il registro tipizzato in `web/src/shared/lib/workspacePanels.ts` compongono
+tre pannelli esportati da `features/chat/index.ts`; nessuna API o tabella
+backend nuova. `workspacePanels.test.ts` prova unicità, ordine e disponibilità;
+`e2e/ui/workspace.spec.ts` prova desktop 1440 px, mobile 375 px, focus trap,
+Escape, bozza dopo collapse, URL/deep-link, 409 e retry del catalogo, cambio
+conversazione durante un run e logout/login con un altro principal senza
+perdita di isolamento. Catture visive locali alle due viewport sono prodotte
+dal test in `web/test-results/` e sono state ispezionate; non sostituiscono
+gli assert. `npm run check` verde (63 Vitest, budget JS 385.7 KB/CSS 25 KB),
+`npm run e2e` 43/43 sul mock dopo l'ultimo aggiornamento; prova live
+PostgreSQL/Ollama resta nei ticket B-09.1/B-09.2/B-09.3.
+
+**Fuori scope B-08.8:** nuove API backend, run durevole B-04–B-07, plugin
+dinamici, drag-and-drop dell'intera shell, personalizzazione arbitraria del
+layout, nuovi workflow Documenti/Elaborati/Collegamenti e copia di asset o
+branding OpenClaw. Il ticket chiude quando esiste la shell verificata, non
+quando tutte le feature future sono state anticipate.
+
+**B-08.2 — elenco e gestione conversazioni**
+
+- [x] Preview 22/09: query lista, creazione/apertura via URL ed eliminazione
+  collegate alle API, con vuoto e caricamento; 6 scenari chat Playwright su
+  trasporto mock. I tipi sono duplicati a mano in `features/chat`, non ancora
+  consumati dal client generato, e questa sottoparte non prova PostgreSQL.
+- [x] Cursori (23/09): `useConversations` migrato a `useInfiniteQuery`, consuma
+  `next_cursor` di `ConversationListDTO` con un bottone «Carica altre»; stato
+  errore aggiunto (`conversationError`, `Alert`). I tipi restano duplicati a
+  mano in `features/chat` (come nel resto del modulo, non solo qui): la
+  migrazione ai tipi generati resta da fare, non è bloccante per il CRUD.
+- [x] Rinomina e cancellazione con `expected_updated_at` dalla lettura reale
+  (23/09): `useRenameConversation`/`useDeleteConversation` inviano la versione
+  letta dal client, 409 gestito con errore visibile e refetch. Conferma
+  proporzionata della cancellazione: due passaggi inline nella riga della
+  lista (nessun modal, coerente con l'assenza di un primitivo Dialog in
+  `shared/ui`/ADR 0005), non un `window.confirm` nativo. Messaggi invalidati
+  (`removeQueries`) e navigazione a `/conversations` se la conversazione
+  attiva viene eliminata.
+- [x] Creazione: nessun retry automatico dopo timeout aggiunto — il contratto
+  `CreateConversationRequest` non ha `idempotency_key`, quindi un retry
+  cieco duplicherebbe la conversazione; resta il solo disabilitamento del
+  pulsante durante il pending (23/09, scelta consapevole, non un gap).
+- [x] Accettazione (23/09, trasporto mock): 10 scenari Playwright in
+  `chat.spec.ts` coprono rinomina, conflitto 409 su rinomina (errore visibile,
+  titolo non sovrascritto), cancellazione a due passaggi con annulla,
+  paginazione senza duplicati. `npm run check` verde (format/lint/typecheck/
+  vitest/licenze/build/bundle).
+- [ ] Resta da fare: migrazione ai tipi generati (`web/shared/contracts/api.d.ts`)
+  per l'intero modulo `features/chat`, non solo conversazioni; prova reale
+  CRUD dal browser su PostgreSQL (oggi solo trasporto mock) e conflitto fra
+  due tab con backend vero — appartiene alla corsia B-09.1/B-09.2 (integrazione
+  browser→API→PostgreSQL), non duplicata qui. L'isolamento fra utenti
+  (ID altrui non accessibile) è già provato lato backend (RLS, `test_api_
+  conversations.py`); manca solo la riprova end-to-end dal browser.
+
+**B-08.3 — cronologia e contenuti**
+
+- [x] Preview 22/09: lettura dei primi 200 messaggi, ordine/ruolo/testo e
+  refresh visibili. È plain text, senza cursori, dedup, date, rendering
+  Markdown o prova reale fuori scope.
+- [ ] Owner `web/features/conversations`: leggere messaggi ordinati con
+  `after_sequence`, riutilizzando `next_sequence` restituito; deduplicare per
+  ID/sequenza. Mostrare ruolo, testo, data e caricamento della cronologia.
+- [ ] Aggiungere rendering Markdown sanitizzato e blocchi codice copiabili;
+  link espliciti, HTML non fidato e immagini remote non caricate implicitamente.
+  Scroll automatico solo quando l'utente segue il fondo; nessuna perdita della
+  posizione durante la lettura di messaggi precedenti.
+- [ ] Non presentare l'append HTTP di un messaggio utente come richiesta a
+  Ollama: il composer «Invia» generativo arriva insieme al run B-04/B-08.5.
+- [ ] Accettazione: storia reale conservata dopo refresh, contenuti ostili
+  inerti e conversazione fuori scope indistinguibile da una inesistente.
+
+**B-08.4 — profilo e modello visibili e modificabili**
+
+- [x] Preview 22/09: selettore manuale dei profili restituiti da `/profiles`,
+  esclusione dei profili senza modello e nome modello accanto al profilo.
+  La scelta è solo stato React e non configura né persiste un binding.
+- [ ] Owner `web/features/profiles` e `web/features/models`: selettore manuale
+  Assistente/Researcher/Coder da `/profiles`; modello corrente e stato leggibili
+  vicino al composer, dettagli tecnici nelle impostazioni.
+- [ ] Catalogo da `/models` e stato B-02.2; UI «Modello del profilo» salva
+  attraverso B-02.1, mostra pending/esito/conflitto e rilegge il binding.
+  Distinguere installato, compatibile e qualificato; nessuna scelta automatica
+  del modello più economico o fallback se quello selezionato manca.
+- [ ] Esplicitare che il cambio vale per i nuovi run. In un run attivo mostrare
+  lo snapshot effettivo; non attribuire i delta in corso al profilo appena
+  selezionato. Parametri avanzati soltanto se supportati dal contratto server.
+- [ ] Accettazione: prima configurazione e modifica persistono al refresh;
+  un run successivo usa il nuovo binding mentre quelli precedenti mantengono
+  versione/modello/digest originari; 403/404/409/503 hanno recupero pertinente.
+
+- [ ] Recupero degli stati B-02.2: configura runtime, riprova connessione,
+  scegli modello installato. Il browser chiama solo il backend; nessuna
+  installazione/download implicita all'apertura del menu.
+
+**B-08.5 — composer e creazione run**
+
+- [x] Preview 22/09: composer a riga singola, invio e abort della fetch sono
+  visibili contro la route inline. Non usa un'entità run, non ha chiave
+  idempotente/riconciliazione e «Stop» non è una cancellazione persistente;
+  viene corretto da 34–36 e poi sostituito dal contratto B-04/B-05.
+- [ ] Dipende da B-04/B-05 e tipi generati: composer multilinea accessibile,
+  scorciatoie esplicite, limiti, pending di accettazione, singolo invio e
+  correlazione fra messaggio ottimistico e messaggio persistito.
+- [ ] Una sola azione usa il contratto coordinato del run, non il semplice
+  append di un messaggio. Dopo timeout riconciliare con stessa chiave.
+- [ ] Accettazione: errore recuperabile, coda piena/worker indisponibile
+  espliciti, refresh conserva stato reale senza duplicare messaggio/run.
+
+**B-08.6 — reducer, stream e Stop**
+
+- [ ] La preview non conta come questa slice: `useChat.ts` concatena delta ma
+  ignora i payload `done/error`, deduce il terminale dal testo e non gestisce
+  replay, buchi o snapshot. Correggere subito il parser in B-03.2-35; il
+  reducer durevole resta dipendente da B-06/B-07.
+- [ ] Dipende da B-06/B-07: reducer puro con duplicati/buchi/fuori ordine
+  e terminale unico; riconnessione dal cursore confermato e confronto
+  snapshot/stream senza raddoppiare testo.
+- [ ] Distinguere coda, generazione, riconnessione, completa, troncata,
+  interrotta e fallita. Modello mostrato dallo snapshot del run, non dal
+  selettore appena cambiato.
+- [ ] Stop mostra «arresto richiesto» fino all'esito autorevole; race con
+  completamento e output parziale visibili. Non fingere annullamento di
+  effetti già compiuti o inviare automaticamente una nuova generazione.
+- [ ] Cambiare pagina chiude lo stream browser ma non cancella il run;
+  ritorno/refresh recuperano. Logout chiude stream e pulisce dati privati.
+- [ ] Accettazione: disconnessione a metà risposta, due tab, replay,
+  stop in coda/inference e click ripetuti convergono al transcript server.
+
+**B-08.7 — strumenti, conferme e fonti**
+
+- [ ] Solo con B-03.2-16 e consumer C–F: attività, fonti apribili, artefatti
+  e anteprima azione/destinatari/dati; approva/rifiuta, scadenza e
+  invalidazione se cambiano gli argomenti. L'approvazione non amplia ACL.
+- [ ] Accettazione: successo dimostrato da ricevuta, mai dal testo del
+  modello; niente link pubblici a path privati, download autorizzati e
+  esiti incerti chiaramente distinguibili.
+
+<a id="prove-condivise"></a>
+#### TODO prove browser e definizione di «prima chat pronta»
+
+**B-09.1 — infrastruttura E2E anticipata (in corso, verifica riaperta)**
+
+- [x] Playwright locked, `npm run e2e`, fixture sintetiche, profili ui/live
+  e job CI presenti. Il profilo ui usa HTTP intercettato, non prova DB o
+  autenticazione reale; l'esecuzione remota CI non è stata osservata qui.
+- [x] Il 22 settembre l'intera suite UI è stata estesa e ripetuta: **24/24
+  verdi** in 37,4 s, incluso il caso doppio click precedentemente instabile.
+- [x] B-03.2-33 chiuso il 23/09 con causa reale, non solo suite verde: vedi
+  dettaglio nella sezione B-03.2-13/14/26/28/33 sopra (guardia sincrona +
+  prova `requestSubmit()`×2, verificata anche in negativo).
+- [ ] Completare scenari residui recovery/scadenza/due identità insieme
+  a 14/26; desktop/mobile e tastiera con evidenze. CRUD/modelli alla loro
+  consegna. Browser→API→PostgreSQL reale separato dai mock, senza account personali.
+
+**B-09.2 — percorso end-to-end completo**
+
+- [x] Preview mock 22/09: 6 scenari chat coprono bootstrap/login, create,
+  profilo Echo, due risposte, refresh, logout/login, delete, 503 pre-stream e
+  profilo senza modello. Il caso chiamato «stop» non preme Stop e lo stream è
+  istantaneo: non qualifica cancellazione, backend, DB o run durevole.
+- [ ] Scenario: avvio → accesso → conversazione → scelta profilo/modello →
+  prompt → risposta → stop → riapertura → logout/login → stessa cronologia.
+  Eseguire con adapter modello deterministico per guasti riproducibili.
+- [ ] Coprire runtime spento, modello rimosso, catalogo vuoto, coda piena,
+  troncamento, stream interrotto, riavvio worker/API e conflitti fra tab.
+- [ ] Due principal: API, eventi/replay, cache e risposte tardive non rivelano
+  titoli, prompt o output altrui. Bundle, i18n, accessibilità, migrazioni,
+  codegen e checker architetturale fanno parte della stessa consegna.
+
+**B-09.3 + B-03.4 — prova locale con modello reale**
+
+- [ ] Ripetere il workflow nel browser contro Ollama, con almeno il modello
+  scelto per la prima consegna qualificato dopo i fix. Registrare versione
+  codice, digest, runtime, hardware, contesto, corpus, primo testo e durata.
+- [ ] Verificare che la UI dichiari correttamente risposta completa/troncata/
+  interrotta e modello utilizzato. Le altre voci del catalogo restano
+  «installate/non qualificate» finché le rispettive prove non sono concluse.
+- [ ] Questa è la soglia per chiamare il risultato «prima chat locale pronta»;
+  la sola build frontend, il fake o lo smoke `.start` non la soddisfano.
+
+#### Integrazione dei successivi workflow C–H
+
+Le righe seguenti dettagliano gli incrementi esistenti, tutti ancora **da fare**.
+Nessuna delle capacità è considerata già sviluppata per il solo fatto che
+NewRay.md ne descrive componenti candidati. I contratti elencati sono proposti,
+da implementare con porte, DTO generati e migrazioni pertinenti.
+
+| Incremento | TODO backend / proprietario | TODO frontend / schermata | Accettazione integrata |
+| --- | --- | --- | --- |
+| C | documents/knowledge: upload limitato, job estrazione/indicizzazione, raccolte, retrieval, API `/collections` e `/documents`, contenuto scoped, retry job e cancellazione derivati | `/documents` e dettaglio: upload/stati/errori, raccolte e allegati nella conversazione, fonti verso l'originale | Passaggi realmente recuperati; due principal, indici/cache/replay/export isolati; cancellare la fonte impedisce anche il retrieval |
+| D | artifacts: revisioni/versione attesa, salvataggio bozza, job DOCX/PDF, download autorizzato, OCR/visione entro capacità qualificate | `/artifacts` ed editor: fonti, modifica/salvataggio, conflitti, stato export, download e limiti OCR espliciti | File apribile della revisione richiesta; errore conserva bozza; originali/anteprime protetti e parti illeggibili dichiarate |
+| E | web research/gateway: provider qualificato, search/lettura, egress, fonti/date/URL e cache scoped cancellabile; browser opzionale | Conversazione/fonti: attività, citazioni apribili, fallimenti di lettura e controllo dell'invio dati | Risposta basata su pagine lette; nessuna query privata senza policy; contenuti esterni inerti |
+| F | communications/connections: account/scadenza/revoca, lettura e bozze, approvazioni legate agli argomenti, effetti e ricevute/riconciliazione, token scoped | `/connections`, bozze/calendario: collegamento, anteprima destinatari/allegati/fuso, approva/rifiuta, esiti reali | Invio/invito solo autorizzato; timeout dopo invio riconciliato; token/log/cache isolati per principal |
+| G | extensions/access/admin: catalogo/import/versioni, permessi/attivazione/rollback, utenti/grant/modelli per ruolo, profili specialistici | Avanzate/Amministrazione: catalogo/stato, permessi e attivazione/revoca, utenti/ruoli, rollback guidato | Import inerte; API protette anche con menu nascosto; revoca su stream/cache, due membri/admin isolati, rollback provato |
+| H | memory/learning: memoria esplicita (B/C ancora da implementare), rettifica/sostituzione/cancellazione, proposte con origine/versione, retention/export/forgetting | Impostazioni Memoria: conferma/rettifica/rimozione, fonti e proposte visibili, controllo attivazione | Scope e rimozione anche dei derivati; nessuna attivazione silenziosa, critic sincrono o apprendimento autonomo implicito |
+
+#### Regola di completamento per ogni futura slice
+
+- [ ] Identificare owner, contratto pubblico, principal, dati/effetti,
+  dipendenze e stato effettivo; nessuna query privata fra moduli.
+- [ ] Consegnare insieme caso d'uso, API, persistenza, route/pagina, cache,
+  caricamento/vuoto/errore/recupero e messaggi IT/EN. Una API pronta può restare
+  «backend completato», ma non chiude il workflow utente finché manca la UI.
+- [ ] Verificare autorizzazioni su API, stream, cache, fonti, indici,
+  anteprime/export e cancellazione per ogni nuova superficie pertinente.
+- [ ] Eseguire unit/contratti, integrazione reale per dati/ACL, browser per
+  l'interazione e live opt-in quando si dichiara qualità del modello/provider.
+- [ ] Registrare nel presente ledger file/change, comandi realmente eseguiti,
+  evidenze e limiti. Aggiornare la mappa funzioni→schermate, evitando che
+  README o una schermata di sessione promettano una chat ancora assente.
+
+Verifica dell'aggiornamento del 21 settembre: ispezione statica di router/DTO,
+bootstrap, adapter, moduli backend, pagine/feature web, i18n, package manifest
+e backlog; inventario allora confrontato con i 9 path / 13 operazioni del
+contratto OpenAPI. Le prove del riesame corrente del 22 settembre sono
+registrate in fondo al ledger e sostituiscono questo snapshot dove il codice
+è cambiato.
+
+### B-03.2 — TODO ingegneristici prioritari
+
+Fonti: [revisione del 16 settembre](evidence/code-review-2026-09-16.md),
+[riesame del 17 settembre con TODO dettagliati](evidence/code-review-2026-09-17.md)
+e riesame del 18 settembre registrato sotto; [verifica del report esterno
+del 21 settembre](../report-analisi-newray.md) per 29–33 e riaperture 13/14.
+Stato iniziale: tutti i sottointerventi **da fare**, salvo avanzamenti
+esplicitamente registrati. Le sigle R01–R13 identificano i rilievi del rapporto.
+Responsabilità e prove di accettazione fanno parte di ogni ticket.
+
+<a id="consolidamento-backend"></a>
+#### Consolidamento backend (compresi DB, launcher e CI)
+
+| ID / priorità | Proprietario e lavoro tecnico | Criterio di accettazione | Stato |
+| --- | --- | --- | --- |
+| B-03.2-01 / P1 / R01 | **Migrazioni/test.** Rendere prioritaria la connessione/DSN esplicitamente iniettata in Alembic; isolare le variabili operative nelle fixture; prima di downgrade/drop verificare nome e ownership del DB temporaneo. Il DSN non va stampato. | Con variabile operativa e DSN test simultanei si usa esclusivamente il DB test; prova senza connessione per la precedenza e integration su DB sacrificabile; downgrade non può bersagliare il DB operativo. | Completato — residui finali chiusi il 18 settembre (parser URL, teardown setup, integration live rieseguita); evidenze sotto la tabella |
+| B-03.2-02 / P1 / R02 | **Identity.** Porta transazionale/UoW per organizzazione, proprietario e sessione; conflitto dell'owner tradotto in errore di dominio dopo rollback; nessuna organizzazione orfana. | Fault injection dopo ciascuna scrittura: zero stato parziale; retry utile; due bootstrap simultanei producono un solo owner/sessione vincente e un conflitto gestito, senza residui. | Completato — porta, adapter, fake e consumer integrati; codegen aggiornato dopo review; evidenze sotto |
+| B-03.2-03 / P1 / R03 | **Profiles.** Seeding atomico e idempotente di binding, tre profili e versioni; gestire concorrenti e riconoscere/riparare esplicitamente gli stati parziali già creati; non usare «esiste un profilo» come prova di completezza. | Guasto a ogni step e doppia prima GET simultanea su PostgreSQL: tre profili completi, binding univoci, nessun 500 o residuo; utente B isolato. | Completato — porta, adapter, fake e integrazione RLS concorrente; evidenze sotto |
+| B-03.2-04 / P1 / R04 | **Conversations.** Completare il contatore atomico e le ricevute scoped già introdotti: sequenza iniziale coerente, backfill dai messaggi esistenti, replay senza incremento o modifica di updated_at; versione attesa per rename/delete verificata atomicamente, con revisione esplicita o equivalente verificato; ordinamento recente non retrocede sotto concorrenza. Completare idempotenza delle mutazioni con perimetro esplicito. Correggere il contratto next_sequence/after_sequence; import datetime della route e contratti generati. | Upgrade 0003 popolata→0004→append senza collisioni; primo messaggio con sequenza 1; due writer PostgreSQL reali con sequenze distinte; retry stessa chiave/payload conserva messaggio, contatore e timestamp, payload diverso→conflitto senza effetti; rename/delete concorrenti non superano entrambi una versione obsoleta; timestamp non retrocede; pagine percorse usando il cursore restituito senza salti; fake coerenti, lint/tipi/codegen verdi. | Completato storicamente il 20 settembre — contatore/backfill non smentiti; il gate corrente upgrade storico è rosso per fixture incompatibile con 0005, tracciato in 29 |
+| B-03.2-05 / P1 / R05 | **Network/models.** Timeout assente eredita quelli del client: oggi viene passato None a HTTPX e disabilita tutti i timeout, non soltanto read; zero invece è trasmesso come 0.0. Separare connessione, inattività e deadline totale; valori non positivi respinti; cancellazione rilascia le risorse. | Test sulle request extensions con e senza override per connect/read/write/pool; zero e negativi respinti; server lento e stream che non termina; nessun timeout accidentalmente disabilitato; limite globale verificato al futuro confine run. | Completato — timeout HTTPX e contratto del run separati; evidenze sotto |
+| B-03.2-06 / P1 / R06 | **Bootstrap/deploy.** Vietare il bind remoto nella modalità personale o definire modalità TLS/proxy esplicita e verificabile; Secure del cookie non autorizza il bind; definire origine canonica, host ammessi e controllo CSRF delle mutazioni. | 0.0.0.0 + solo cookie Secure rifiutato; Origin/Host estranei negati senza effetti, incluso bootstrap/revoca; same-origin lecito funziona; modalità proxy coperta da prova dedicata prima dell'ufficio. | Completato — origine canonica e same-origin server-side; proxy ufficio non ancora configurato |
+| B-03.2-07 / P2 / R07 | **Profiles/PostgreSQL.** Unificare get/list sulla versione massima per (created_at, id), selezionata in SQL; il fake deve seguire lo stesso contratto. | Due versioni con binding diversi: lista, lettura singola e risoluzione concordano sulla più recente su PostgreSQL, incluso pareggio temporale. | Completato — DISTINCT ON con ORDER BY DESC, prove unit + integration; evidenze sotto |
+| B-03.2-08 / P2 / R08 | **Profiles/models/settings.** Eliminare il nome modello hardcoded dal provisioning; selezione esplicita da config/catalogo con nome canonico e digest; nessuna sostituzione automatica. Pianificare la migrazione dei binding immutabili già presenti con nuova versione esplicita. | Config di modello locale diverso produce binding corretto; tag canonici risolti coerentemente; modello assente produce MODEL_UNAVAILABLE; cambio config non riscrive profili/versioni o run già creati. | Completato — tag da config, nessun rewrite; digest e ID nel snapshot |
+| B-03.2-09 / P2 / R09 | **Dominio profiles/models.** Snapshot profondamente immutabile e indipendente dagli oggetti sorgente; includere riferimenti stabili a versione, binding, digest e parametri serializzabili; vietare snapshot eseguibili senza artefatto identificato. | Mutazioni di dict/list annidati nel chiamante non cambiano lo snapshot; tentativi di mutarlo falliscono; round-trip persistente conserva lo stesso significato; nuova configurazione vale solo per run nuovi. | Completato — copia profonda JSON, digest obbligatorio e riferimenti stabili |
+| B-03.2-10 / **P1** / R10 | **Adapter Ollama.** Le [evidenze live del 17 settembre](evidence/local-models-qualification-2026-09-17.md) registrano testo vuoto con num_predict=24 e stop nell'adapter; il confronto diretto con done_reason era assente nella prima sonda. Il codice e la fixture del riesame del 18 confermano la lettura del campo errato. Usare e validare done_reason, senza coercizioni arbitrarie; terminale unico, EOF prematuro/schema invalido tipizzati; mappare NetworkUnreachable anche mid-stream; chiusura esplicita via aclose/aclosing nel consumer. Distinguere catalogo vuoto, runtime non configurato e runtime irraggiungibile. | Fixture length/stop, tipi invalidi, disconnessione e riga invalida; EOF senza done fallisce; nessuna doppia completion; cancel chiude connessione; tre stati del catalogo distinguibili e recuperabili, senza fallback; contratti rigenerati se evoluti; smoke con digest/runtime e confronto diretto done_reason registrati. | In corso — stream corretto; residuo stati del catalogo riaperto dal piano WebUI e assegnato a B-02.2; smoke live con B-03.4 |
+| B-03.2-11 / P1 / R11 | **Profiles/bootstrap/database.** Evitare I/O PostgreSQL sincrono nel ciclo eventi delle route async tramite adapter async oppure offload dell'intero blocco sincrono; una lettura del catalogo per operazione; ownership e dispose espliciti degli engine a shutdown e pulizia dei client su errore di avvio. Definire limiti di pool e attesa DB/lock coerenti con le deadline. La route chat inline aggiunta il 22/09 richiama sincronicamente conversazioni/messaggi prima e durante l'handler async. | Una query DB sospesa non blocca una richiesta/stream indipendente; numero di chiamate catalogo costante rispetto ai profili; rilascio di connessioni/client verificato a shutdown e su avvio fallito; attese DB limitate e rollback verificato. Il test include ora anche `/conversations/{id}/run`. | Completato nuovamente (22 settembre 2026) — `InlineRunService` offloada ogni blocco conversations; nessuna transazione resta aperta durante inference; regressioni in B-03.2-36 e suite completa verdi |
+| B-03.2-12 / P2 / R12 | **Tooling architettura.** Verificare core→adapter anche nello stesso modulo, core→infrastructure e adapter→interfaces; risolvere import relativi, inclusi __init__.py, e catene di re-export. Coprire pydantic_settings/requests e file fuori categoria; definire una policy esplicita per import dinamici, senza promettere analisi statica arbitraria. | Test negativi permanenti per ciascuna categoria; adapter→porte e bootstrap→adapter passano; cicli attraverso re-export rilevati; file non classificato segnalato; import dinamico vietato o eccezione motivata verificabile; checker integrato nella CI con B-03.2-21. | Completato — confini rafforzati e test negativi; gate CI script dedicato in B-03.2-21 |
+| B-03.2-14 / P1 prodotto | **Identity/sessione.** Percorso di rientro autenticato e recupero locale dopo logout/scadenza; separare bootstrap da login; evitare password condivise o ricreazione silenziosa dell'owner; svuotare cache/stream privati al cambio identità. | Bootstrap→logout→login restituisce gli stessi dati autorizzati; scadenza/cookie cancellato recuperabili; identità errata negata; nessun reset del DB per rientrare; test browser. | **Completato 23/09** (parte backend): comando CLI `recover_credential`, RLS reale provata, bug `update_credential_hash` corretto. Cache/stream al cambio identità → B-03.2-26 (completato). Resta solo la guida operativa lato UI (frontend, non backend) |
+| B-03.2-15 / P2 | **HTTP/DTO.** Uniformare errori di validazione, dominio e trasporto nel payload pubblico; rifiutare titoli/messaggi solo whitespace senza alterare il contenuto utile; validare charset/lunghezza di X-Request-ID prima di echo/log, generando un ID server se invalido; correlation ID nei log minimizzati. Retryable deriva dalla semantica dell'operazione, non da ogni 500; rigenerare schemi/client. | Input invalido→422 con envelope concordato; fixture whitespace e request ID fuori limite/con caratteri di controllo; nessun echo arbitrario, segreto o stack; retry non suggerito per effetti incerti; client distingue validazione e guasto; codegen senza drift. | Completato (22 settembre 2026) — X-Request-ID validato (ASCII stampabile, max 128 char, UUID server se invalido); RequestValidationError→422 VALIDATION_ERROR con envelope fisso; whitespace-only rifiutato su titoli/messaggi; 500 retryable=False; 6 test contratti + 2 test conversazioni; codegen rigenerata senza drift; evidenze sotto |
+| B-03.2-16 / P2 | **Models/tools/access.** Completare il disegno minimo di ChatModel per tool call/result, capability e cancellazione; definire gateway e policy server-side che saranno usati dal run; nessun effetto eseguito direttamente dal testo del modello. | Contract test del ciclo tool sullo stesso modello; tool ignoto negato, approvazione non amplia ACL, revoca prima dell'effetto; scopo di B-04/B-05 aggiornato prima di implementare effetti. | Da fare |
+| B-03.2-17 / P2 | **Deploy/documentazione.** Allineare ruoli DB fra test e Compose; pin delle immagini/runtime; password passata in sicurezza a SQL in 00-roles.sh e codificata correttamente nei DSN; validare DSN senza esporre credenziali. Rimuovere NEWRAY_MIGRATION_DATABASE_URL dall'ambiente dell'app dopo la migrazione; utente container non root, healthcheck API e permessi del volume coerenti. Provare build/avvio e aggiornare README/AGENTS a comandi reali. | App usa ruolo non owner/non BYPASSRLS e non eredita il DSN migratore; password sintetiche con apici e caratteri riservati funzionano senza alterare SQL o destinazione; test di isolamento nel deployment; healthcheck distingue app pronta/non disponibile; avvio non root verificato; immagini identificate; nessuna qualifica dedotta dalla sola compose config. Build/smoke in CI nel ticket 27. | In corso — avvio nativo configurabile e diagnostico; deployment completo resta da qualificare |
+| B-03.2-18 / P1 | **Adapter Ollama — capacità `thinking`.** Tutti e quattro i modelli del catalogo la dichiarano e Ollama la applica per default; l'adapter non invia `think` e scarta `message.thinking`. Misurato il 17 settembre: 28 secondi senza alcun delta visibile a modello già caricato, e budget di token consumato dal ragionamento fino a produrre una risposta vuota. Decidere il contratto: disattivare `think` nella richiesta, oppure esporre il ragionamento come evento di stream distinto dal contenuto. La scelta condiziona B-06 (tipi di evento) e la contabilizzazione dei token in B-04. | Con modello `thinking`, il primo delta visibile arriva entro un limite dichiarato oppure la UI ha uno stato esplicito; nessuna risposta vuota presentata come completata; i token di ragionamento sono contabilizzati e distinguibili da quelli di contenuto; contract test con fixture che contengono `message.thinking`. | Completato — prima UI invia esplicitamente `think: false`; evidenze sotto |
+| B-03.2-19 / P2 | **Operazioni — isolamento della GPU di display.** `serve_ollama_local.sh` avvia Ollama in un mount namespace privato che nasconde il backend CUDA (default `amd`), perché in modalità `auto` Ollama apre un contesto sulla scheda NVIDIA a ogni discovery della VRAM anche eseguendo l'inferenza su ROCm; `OLLAMA_LIBRARY_PATH` e `CUDA_VISIBLE_DEVICES` sono stati verificati inefficaci. Portare lo stesso confine nel deployment Compose e documentare la topologia multi-GPU. Considerare la contesa con `llama-server` di llama.cpp, che parte al boot e occupa 27,6 GiB della stessa scheda. | Avvio senza occorrenze di `verifying if device is supported` sulla GPU di display; `inference compute` elenca la sola scheda di calcolo; il piano risorse di §8.4 tiene conto dei consumatori esterni della GPU. | Da fare |
+| B-03.2-20 / P2 | **Tooling di qualifica.** Registrare errori discovery/warmup/sonde/unload, anche prima dell'ingresso nelle sonde; chiudere HttpClient per modello in finally; scrivere progressivamente e atomicamente tutti i rapporti di local_models.py, smoke_local_models.py e qualify_local_models.py con ID esecuzione, hash codice/corpus, digest e hardware. Gestire modello/tag non trovato senza StopIteration non trattata; individuare la GPU selezionata senza assumere la prima card AMD. | Fault injection in ogni fase: JSON valido della nuova esecuzione, modello fallito presente nel rapporto parziale, errore conservato, exit non zero, client chiuso, nessun falso successo o riuso ambiguo del report precedente; test sintetico multi-card e modello assente, senza GPU/rete. | Da fare |
+| B-03.2-21 / P2 | **Tooling/CI.** Rendere importabili i test scripts senza unittest.main incondizionato; path indipendenti dalla CWD; eseguire esplicitamente scripts/tests/test_local_models.py e negativi del checker nei gate, con lint/format pertinenti. Usare l'interprete del backend per codegen senza fallback basato sulla sola presenza di FastAPI; Python dichiarato per il checker di sola stdlib, senza imporre dipendenze inutili. | CI intercetta un difetto dello script; discovery sicura anche da altra CWD; codegen usa le dipendenze locked; test senza GPU/download/rete; live separati e opt-in. | Completato 23/09 in codice/CI: `unittest discover` 15 test (1 live skipped) anche da `/tmp`, Ruff script 6 file, codegen drift=0; primo push CI non osservato |
+| B-03.2-22 / P2 sicurezza | **Identity/PostgreSQL.** Definire policy e grant minimi per organizations, oggi priva di RLS: lettura scoped all'organizzazione, bootstrap controllato, nessuna nuova facoltà UPDATE implicita. Rilievo 4 del report: get_organization è senza scope e inutilizzato; rimuoverlo con fake/porta aggiornati oppure renderlo scoped. La sola documentazione non sostituisce RLS; RLS senza contesto negherebbe la lettura, non aprirebbe un bypass. Rivedere anche il confine pre-auth users_owner_lookup: flag applicativo non è una credenziale, nessun nuovo privilegio di mutazione o esposizione dell'hash. Separare lookup della credenziale di sessione dalle policy di mutazione; rendere esplicito lo scope della revoca applicativa senza cambiare il logout della sessione corrente. | PostgreSQL reale: nessuna lettura organizations fuori scope o senza contesto; bootstrap atomico e membro della stessa organizzazione secondo policy documentata; revoca non autorizzata di sessione altrui senza effetti; lookup iniziale funzionante; route usa solo la sessione autenticata. Nessun exploit HTTP cross-utente dato per dimostrato. | Completato (22 settembre 2026) — migrazione 0007 abilita e forza RLS organizations e separa lookup sessione da mutazioni scoped; porte/fake/adapter richiedono OrganizationScope e Principal; suite PostgreSQL reale verde; evidenze sotto |
+| B-03.2-24 / P2 | **Conversations/profiles — query e indici.** Valutare tiebreaker id negli indici di conversazioni/versioni e variante owner-leading solo dove utile; verificare filtri SQL tipizzati e cast UUID→testo nelle RLS con il ruolo app. Evolvere gli indici con migrazione esplicita; preservare l'isolamento. | Dataset sintetico rappresentativo, EXPLAIN ANALYZE con ruolo applicativo e pagine profonde; confronto prima/dopo di righe esaminate, sort e tempi; nessun vincolo artificiale “mai seq scan”; ordering a timestamp uguali corretto; RLS invariata nei risultati. | Da fare |
+| B-03.2-27 / P2 | **CI/supply chain.** Gate licenze Python sull'albero locked con eccezioni motivate coerenti con le dipendenze adottate; build Dockerfile, compose config e smoke di avvio in CI con credenziali sintetiche. Riutilizzare il contratto deployment di 17 e i gate script di 21. | Dipendenza priva di licenza o fuori policy fallisce il gate; dipendenze ammesse ed eccezioni documentate passano; immagine costruita e servizio pronto verificato nel job; nessuna dipendenza da config locale, GPU o account; distinguere workflow definito da esecuzione CI realmente osservata. | Da fare |
+| B-03.2-29 / P1 / report #2 | **Backend — fixture migrazioni.** Popolare lo schema 0003 con fixture SQL nel formato storico, senza credential_hash né adapter correnti dipendenti dallo schema head. Costruire Principal sintetico coerente; conservare contesto RLS e guardie del DB sacrificabile. Non cambiare migrazioni di produzione per correggere il test. | Il test test_upgrade_0003_popolata_preserva_sequenze_e_alloca_la_successiva passa su PostgreSQL reale: messaggi 1/2 preservati, nuovo append 3, next_sequence 4, RLS e grant ripristinati. Suite integration completa verde senza skip per DSN mancanti. Ripristina la verifica corrente di 04, non ne annulla la prova storica. | Completato — fixture 0003 nel formato storico, test verde su PostgreSQL reale; suite integration completa 47 passed senza skip; evidenze sotto |
+| B-03.2-30 / P1 / report #1 | **Backend — identity.** Definire una normalizzazione unica del nome per bootstrap/login e una validazione del nome vuoto dopo trim, nei casi d'uso oltre ai DTO. Preservare gli spazi interni; non introdurre case folding o identità alternative implicitamente. Gestire owner già salvati con spazi tramite migrazione/recupero espliciti, senza cambiare ID, perdere dati o consentire login col solo nome. | Regressioni unit/API/DB: bootstrap con spazi → logout → login con e senza spazi, whitespace-only rifiutato senza scritture, credenziale sbagliata negata. Dati storici padded/legacy migrati e ancora accessibili; UX frontend già trim non conta come correzione server. | Completato — normalizzazione unica nei due confini, 400 INVALID_NAME su solo whitespace, migrazione 0006 per gli owner legacy; evidenze sotto |
+| B-03.2-31 / P2 / report #3 | **Backend — identity/login.** Uniformare il lavoro di verifica nei rami nome assente/password errata usando hash dummy precalcolato con costo coerente alla libreria scelta in 32. Definire anche protezione da abusi senza lockout permanente; valutare esplicitamente disclosure CREDENTIAL_NOT_SET e stato pubblico installazione. Mai promettere tempo HTTP costante. | Test deterministici del verificatore in entrambi i rami, stesso envelope per unknown/wrong, nessuna sessione creata; recovery legacy conforme al contratto documentato, limiti di abuso e errori recuperabili provati. Misure temporali solo diagnostiche, non soglie CI fragili. | Completato (22 settembre 2026) — dummy_verify() con _DUMMY_HASH Argon2id precalcolato al caricamento modulo; login() chiama dummy_verify quando utente non trovato; stesso envelope INVALID_CREDENTIALS per unknown/wrong; test unit test_login_owner_sconosciuto_esegue_dummy_verify verde; evidenze sotto |
+| B-03.2-32 / P2 / riesame aggiuntivo | **Backend — identity/crypto.** Allineare hashing a pwdlib/Argon2 e libreria mantenuta prescritti da NewRay.md §§4.2/20.3; dipendenze/licenze locked, formato e verifica negli adapter dietro porta se richiedono librerie. Definire compatibilità/rehash degli hash PBKDF2 esistenti, senza reset forzato o perdita accessi. Una scelta diversa richiede decisione di prodotto/ADR esplicita, non assunzione del report. | Test hash esistente e nuovo, password errata, record malformato, rehash atomico e login concorrente; nessun hash/password in DTO o log, confini architetturali verdi. Normalizzazione e dummy verification di 30/31 compatibili; criteri documentati. | Completato (22 settembre 2026) — pwdlib[argon2] aggiunto, hash_credential produce Argon2id, verify_and_check_rehash con compat PBKDF2, rehash atomico su login, dummy_verify precalcolato; 8 test unit + 3 test applicazione, mypy/ruff/architettura verdi; evidenze sotto |
+| B-03.2-34 / **P1 / primo backend** | **Models/runs — token/s.** Acquisire `eval_duration` con `eval_count`, normalizzare unità e calcolare throughput della sola generazione; esporre dato nullable nel terminale preview e conservarlo nel futuro snapshot/evento run. Nessuna stima dal testo o dal wall clock browser. | Fixture vendor valide/invalide/omesse/zero; formula e unità deterministiche; payload HTTP e futuro replay concordano; nessun contenuto nei log. Runtime senza misura produce «non disponibile», non zero. | Completato per la preview (22 settembre 2026) — contratto, adapter, terminale HTTP, codegen e live Ollama verdi; persistenza snapshot/evento resta esplicitamente in B-04/B-06 |
+| B-03.2-36 / **P1** | **Chat inline — contenimento/migrazione.** Etichettare la route transitoria; rimuovere Echo dal wiring di produzione; impedire prompt orfani/duplicati, definire budget contesto e stati terminali onesti; offload DB (11); aggiungere contract/integration/RLS test. B-04–07 restano l'architettura finale. | Modello non configurato non genera Echo; successo/length/errore/cancel e due principal provati sulla route reale; nessun prompt isolato dopo errore; disconnessione non dichiarata come stop autorevole; budget dichiarato; percorso di sostituzione senza doppia API. | Completato il contenimento (22 settembre 2026) — owner runs, coppia atomica/idempotente, budget, terminali, cancel e RLS verificati; sostituzione durevole resta B-04–B-07 |
+| B-03.2-38 / **P1** | **Profiles — replay dello switch modello.** Calcolare il payload hash sui campi inviati, non sulle istruzioni ereditate mutabili; cercare la ricevuta scoped prima del catalogo; serializzare due richieste con la stessa chiave nel writer PostgreSQL. Nessun replay deve creare una versione nuova. | Retry dopo un successivo cambio istruzioni e catalogo vuoto restituisce versione/binding originali; chiave riusata con payload diverso→409; concorrenza stessa chiave non supera la ricevuta. | Completato (23 settembre 2026) — `application.py`, porta, fake e adapter Postgres corretti; test unit e integration concorrente verdi su PostgreSQL reale (63 integration passed, 0 skipped); la prova concorrente `test_switch_model_due_scritture_concorrenti_una_sola_vince` eseguita su DB sacrificale e PASSED; evidenze sotto |
+
+<a id="consolidamento-frontend"></a>
+#### Consolidamento frontend
+
+| ID / priorità | Proprietario e lavoro tecnico | Criterio di accettazione | Stato |
+| --- | --- | --- | --- |
+| B-03.2-13 / P2 / R13 | **Web sessione.** Collegare pending/errori delle mutation al pannello; mostrare errori bootstrap anche diversi da CONFLICT e gli errori di revoca; disabilitare revoke durante pending e prevenire doppi invii; distinguere bootstrap, revoca e caricamento; messaggi/recupero it/en e focus accessibile. Timeout/scadenza nel ticket 26, login e pulizia cache nel 14. | Test di interazione con POST 500/rete interrotta e revoca fallita; errore visibile e retry pertinente, nessuna falsa conferma di logout; invio singolo durante pending; browser/tastiera verificati. | In corso — 24/24 UI verdi il 22/09, ma la causa del precedente doppio POST non è stata isolata; diagnosi e stabilizzazione restano in 33 |
+| B-03.2-26 / P2 | **Web client/sessione.** Timeout e AbortSignal componibili, cleanup delle richieste; 401 sulle chiamate protette aggiorna lo stato di sessione coordinandosi con il recupero di 14. Error boundary per rendering, errori asincroni gestiti nei consumer, correlation ID visibile negli errori e rotta 404. Cache delle risorse private scoped all'identità; la query della sessione corrente può restare globale se invalidata correttamente. | Richiesta appesa→errore it/en entro soglia dichiarata; cancellazione pulisce timer/risorse; sessione scaduta→rientro senza dati privati residui; nessun retry automatico delle mutation con esito incerto; test vitest di 401, timeout, crash rendering, 404 e cambio identità; workflow browser con 13/14. | Completato 23/09 (trasporto mock) — manca solo il correlation ID visibile in UI |
+| B-03.2-33 / P2 / riesame aggiuntivo | **Frontend — sessione e Playwright.** Diagnosticare il doppio POST visto nel test bootstrap; controllare finestra fra fine mutation e refetch identità e timing della fixture. Rendere invio/pending/transizione coerenti e prova sincronizzata su eventi, senza mascherare il difetto con retry o sleep maggiori. Non assumere che isPending escluda tutte le race. | Test browser a risposta controllata: click/Enter ravvicinati durante pending e transizione producono un solo POST; errore consente retry esplicito, focus e redirect corretti. Ripetizioni e intera suite verdi; preservare atomicità server senza dedurre due account dalle due richieste mock. | Completato 23/09 — causa reale trovata (guardia su `isPending` insufficiente, non solo suite verde); guardia sincrona + `requestSubmit()`×2 in `BootstrapPanel`/`LoginPanel`/`SettingsPanel`, verificata anche in negativo |
+| B-03.2-35 / **P1 / primo frontend** | **Web chat — SSE e meter token/s.** Decoder SSE per frame/chunk, payload terminali e EOF; mostrare meter dalla metrica server di 34, con `length`, error, abort e dato non disponibile distinti. | Vitest/Playwright con frame spezzati, stop/length/error mid-stream/EOF/abort; nessuna falsa completion; valore autorevole e stabile, senza stima browser o telemetria esterna. | **Completato 23/09** — 22 Vitest + 7 Playwright verdi |
+| B-03.2-37 / **P1** | **Web SSE — CRLF tra chunk.** Conservare il CR pendente al confine dei chunk; `finish()` tratta CR finale come terminatore senza promuovere un frame incompleto a `done`. | Stesso stream diviso in qualsiasi punto del CRLF produce gli stessi frame; EOF senza terminale resta guasto. | Completato 23/09 — `SseDecoder`, regressione Vitest su ogni punto di split; incluso nei 63 test di `npm run check`. |
+| B-03.2-39 / **P1** | **Web chat — isolamento della conversazione nello stream.** Associare stato/delta al conversation ID, abortire e mascherare il vecchio stream al cambio route; scartare continuazioni tardive anche dopo un nuovo invio. | Da A a B durante un run nessun delta/terminale di A appare in B; logout chiude stream e cache privata; nessun retry cieco. | Completato 23/09 — `useChat`, reset reducer, Playwright B-08.8 con run trattenuto e cambio principal; UI mock, prova live in B-09. |
+
+#### Igiene condivisa: assegnazione esplicita
+
+B-03.2-28: backend possiede segreti/build/codegen/documentazione tecnica e
+porte inutilizzate; frontend possiede bundle checker, i18n, lang e stringhe.
+I due contributi chiudono un solo ticket, con verifiche separate.
+Residuo frontend 21/09: i18n coerente it/en (parità chiavi testata), lang
+dinamico e chiavi inutilizzate rimosse sono stati completati in B-03.3;
+resta da chiudere la parte backend del ticket.
+
+| ID / priorità | Proprietario e lavoro tecnico | Criterio di accettazione | Stato |
+| --- | --- | --- | --- |
+| B-03.2-28 / P3 | **Igiene/documentazione/Web.** Escludere .newray-test-env.sh e segreti locali dai percorsi di versionamento/build; bloccare hatchling; inventario script e README/AGENTS aggiornati, distinguendo range manifest e lock effettivo. Write atomiche del codegen, errore leggibile del bundle checker senza build; i18n coerente, lang dinamico, chiavi/stringhe inutilizzate; motivazioni delle licenze ammesse. Valutare metodi identity inutilizzati e NEWRAY_DATA_DIR: mantenere con contratto motivato o rimuovere con consumer aggiornati, senza tagli automatici. | Checklist con prova per ogni modifica; nessun segreto nei log/fixture o contesti distribuiti; codegen deterministico e senza drift dopo interruzione/rigenerazione; README senza affermazioni obsolete; controlli it/en e gate pertinenti verdi. Il lavoro multi-GPU/report appartiene a 20. | Da fare |
+
+**Gate di uscita:** chiudere tutti i sottointerventi con change identificabile
+e prove pertinenti, ripetere suite offline + integration PostgreSQL e workflow
+browser di sessione, verificare contratti/import/build. I live indicano modello,
+digest, runtime, GPU, contesto e limiti; fake e test unitari non sostituiscono
+le prove concorrenti o GPU. Registrare eventuali modifiche di perimetro con
+motivazione esplicita; non dichiarare completato il contenitore per la sola
+presenza dei TODO. Lavori successivi B-04 restano da fare.
+
+### Riesame del 18 settembre 2026 — TODO aggiornati su richiesta dell'utente
+
+Il confronto dell'analisi esterna con il codice ha aggiornato i ticket sopra;
+questo aggiornamento documentale non implementa fix né chiude attività.
+Le chiusure 01/02/03/07 restano storiche; 04 è ora **in corso** perché esistono
+migrazione 0004, contatore e ricevute, ma non soddisfano ancora l'accettazione.
+La tabella di A conserva lo stato **in corso** del contenitore: le chiusure dei
+suoi sette ticket non sostituiscono la qualifica corrente dopo il consolidamento.
+
+**Rilievi nuovi in 04, da verificare nel candidato corretto:**
+
+- `routes/conversations.py:119` usa datetime senza importarlo: lint, mypy e
+  OpenAPI/codegen falliscono nella copia esaminata.
+- `0004_conversations_reliability.py` inizializza il contatore a 1 senza
+  backfill; l'append incrementa prima di restituire la sequenza. Il primo
+  messaggio partirebbe da 2 e l'upgrade di conversazioni popolate può collidere
+  con sequenze esistenti. Provare upgrade con dati, non solo database vuoto.
+- `PostgresMessageStore.append` modifica contatore e updated_at prima della
+  verifica della ricevuta: il replay dello stesso payload committa quei cambi.
+- Rename/delete confrontano la versione in una SELECT separata dalla mutazione,
+  senza lock preventivo o predicato condizionale: il controllo non è atomico.
+  Il timestamp acquisito prima del lock può inoltre retrocedere nell'ordine
+  delle scritture. Provare entrambe le condizioni con writer reali.
+- Il cursore restituito è ultimo+1, ma after_sequence è esclusivo: il suo riuso
+  diretto salta un messaggio. Il test esistente passa manualmente ultimo,
+  senza verificare il round-trip del cursore restituito.
+
+**Precisazioni vincolanti per evitare lavoro duplicato o diagnosi errate:**
+
+- Non creare il proposto **23**: `web/.prettierignore` esiste già ed esclude
+  `src/shared/contracts`, dove risiede api.d.ts. B-03.3 non ha questo prerequisito
+  aperto; deve preservare l'esclusione durante la migrazione.
+- Non creare il proposto **25**: validazione e correlation ID confluiscono in
+  **15**, pulizia delle superfici in **28**, schema dello stream in **10**.
+  I numeri 22/24/26/27/28 conservano il riferimento alle proposte discusse;
+  i numeri mancanti non rappresentano ticket aperti o completati.
+- **05:** una sonda sulle request extensions conferma None→timeout disabilitati
+  per connect/read/write/pool; zero→0.0, non timeout disabilitato.
+- **10, integrazione del criterio:** finish_reason è già convertito con str;
+  validare invece done_reason e i tipi dei chunk, senza trasformare oggetti
+  arbitrari in motivi di completamento validi. Una fixture done_reason=length
+  oggi produce stop. Distinguere catalogo vuoto, runtime non configurato e
+  runtime irraggiungibile con esiti tipizzati e recupero comprensibile; testare
+  separatamente i tre casi e rigenerare i contratti se cambiano. Nessun fallback.
+  L'evidenza live del 17 settembre documenta testo vuoto a 24 token; il confronto
+  diretto con done_reason non faceva parte di quella prima esecuzione e va
+  rieseguito dopo il fix. L'errore mid-stream non mappato è confermato nel codice.
+- **22:** organizations è senza RLS e ha SELECT/INSERT al ruolo app, ma non è
+  stata dimostrata un'esfiltrazione tramite endpoint. La route di revoca usa
+  principal.session_id; non accetta una sessione bersaglio dal payload.
+  Rafforzare il confine applicativo/DB senza chiamarlo DoS HTTP accertato.
+  L'ufficio serve una sola organizzazione per installazione, non un SaaS.
+- **24:** l'indice conversations per organizzazione/owner/updated_at esiste;
+  manca id. Valutare query e RLS insieme agli indici, senza promettere un piano
+  specifico indipendente dal volume di dati.
+- **01:** il guard dei database sacrificabili protegge i percorsi distruttivi
+  dei test; non imporlo a tutte le migrazioni ordinarie in env.py.
+- **26:** un handler globale unhandledrejection non sostituisce la gestione
+  degli errori asincroni; la sola chiave identity globale non dimostra un leak.
+- **28:** i range del manifest non negano il blocco delle versioni nel lockfile.
+  `.newray-test-env.sh` va escluso, senza affermare che sia stato committato:
+  git status non era disponibile nella copia esaminata.
+
+**Controlli eseguiti durante il riesame, prima di questo aggiornamento:**
+
+| Controllo | Esito osservato |
+| --- | --- |
+| Backend pytest offline | 145 passed, 1 failed, 35 skipped; fallisce la costruzione OpenAPI per datetime mancante |
+| Ruff lint / format | 4 errori lint; 4 file da formattare |
+| Mypy | 1 errore, datetime non definito |
+| generate_contracts.py --check | Fallisce nella costruzione OpenAPI, prima del confronto dei file |
+| check_architecture.py | Passa su 56 file; sonde negative non rilevano core→adapter, core→infrastructure, adapter→interfaces, pydantic_settings e requests |
+| scripts/tests/test_local_models.py | 2 test passati |
+| web/npm run check | Passa: 11 test, format/lint/tipi/licenze/build/budget |
+| Sonde HTTPX/parser in memoria | Confermati timeout omesso disabilitato, conversione a stringa già presente e done_reason ignorato |
+
+Limiti: PostgreSQL live, concorrenza reale, GPU, Docker e browser E2E non
+rieseguiti in questo riesame. I nuovi rilievi SQL sono analisi statica, non
+prove live concluse. Una sonda HTTP aggiuntiva sulla paginazione è stata
+interrotta senza risultato: il rilievo deriva dal contratto e dal codice del
+test esistente. Nessun manifest/hash del candidato prodotto da questa revisione;
+i risultati non qualificano modifiche successive.
+
+### Avanzamento B-03.2-04 — 18 settembre 2026
+
+Implementata la slice conversations: 0004 esegue il backfill di
+`next_sequence` da 0003 e mantiene il valore come prossimo libero; append
+prende il lock della conversazione, risolve la ricevuta prima di mutare e
+avanza `updated_at` monotonamente. Rename/delete usano il token
+`expected_updated_at` nel predicato della stessa mutazione; il cursore dei
+messaggi restituisce l'ultimo valore da riusare come `after_sequence`.
+Rigenerati OpenAPI e client TypeScript dai DTO; fake e test coprono replay,
+ordinamento e conflitto obsoleto. Aggiunti test PostgreSQL per migrazione
+0003 popolata, append concorrenti, replay e mutazioni obsolete.
+
+Controlli locali: `ruff check .`, `ruff format --check .`, `mypy`, pytest
+offline (`148 passed, 39 skipped`), `generate_contracts.py --check`, checker
+architettura e `web/npm run check` verdi. Il tentativo dei test PostgreSQL
+fallisce prima delle migrazioni: `pg_isready -h 127.0.0.1 -p 5433` non riceve
+risposta e psycopg non connette. Non è stata avviata né modificata l'istanza;
+rieseguire integration e migration tests con i tre DSN di test quando il server
+è disponibile. Questa era un'evidenza incompleta, superata dalla chiusura del
+20 settembre qui sotto.
+
+### Evidenze B-03.2-04 — chiusura (20 settembre 2026)
+
+- La prova PostgreSQL ha riprodotto un difetto reale della migrazione 0004:
+  con `FORCE ROW LEVEL SECURITY` il proprietario delle migrazioni non vedeva
+  conversazioni o messaggi nello scope assente, quindi il backfill lasciava
+  `next_sequence` a `NULL`. La migrazione disabilita RLS su entrambe le tabelle
+  soltanto nella transazione del backfill, poi ripristina immediatamente
+  `ENABLE ROW LEVEL SECURITY` e `FORCE ROW LEVEL SECURITY`; non introduce un
+  bypass permanente.
+- `test_upgrade_0003_popolata_preserva_sequenze_e_alloca_la_successiva` ora
+  popola direttamente lo schema storico 0003 e prova `0003 → 0004 → append`:
+  le sequenze storiche 1/2 restano valide, il primo append post-upgrade è 3 e
+  il contatore passa a 4. Il test cross-principal è stato allineato al contratto
+  0004: il lock della conversazione sotto RLS rende il bersaglio invisibile e
+  restituisce `NotFound`, mentre i vincoli compositi restano la barriera SQL.
+- Prova reale su PostgreSQL 18.6 + pgvector 0.8.6 in cluster effimero isolato
+  su loopback: `uv run pytest tests/integration -q` → **37 passed**. Include
+  migrazione popolata, append concorrenti, replay idempotente e mutazioni con
+  versione obsoleta. Nessun database operativo è stato usato: le fixture hanno
+  creato e rimosso soltanto database `newray_it_*`.
+- Gate finali: backend offline **148 passed, 39 skipped**; `ruff check .`,
+  `ruff format --check .`, `mypy` (56 file), codegen `--check` e checker
+  architettura verdi; `web/npm run check` verde (11 test, build e budget).
+
+### Evidenze B-03.2-05 — chiusura (20 settembre 2026)
+
+- `HttpClient` configura e valida esplicitamente connect/read/write/pool;
+  nessuno può essere nullo o non positivo. Quando l'inattività non è
+  sovrascritta, `post_stream` non passa `timeout=None` a HTTPX e conserva i
+  quattro limiti del client. Un override modifica soltanto `read`, che HTTPX
+  definisce come inattività fra operazioni di rete.
+- `ChatRequest.inactivity_timeout` sostituisce il campo ambiguo `timeout` ed
+  rifiuta zero o valori negativi. Il contratto `ChatModel` dichiara che la
+  deadline totale appartiene a B-04/B-05: sarà applicata dal run anche a uno
+  stream che continua a emettere chunk, senza confondere tale budget con
+  l'inattività dell'adapter.
+- I contratti offline verificano le request extensions complete con e senza
+  override, timeout non positivi, timeout in lettura a metà stream e chiusura
+  con `aclose` anche per uno stream senza fine. Nessun retry o fallback viene
+  introdotto.
+- Gate: **155 passed, 39 skipped** nel backend; Ruff, format, mypy, codegen e
+  checker architettura verdi. `web/npm run check` verde (11 test, build,
+  licenze e budget).
+
+### Evidenze B-03.2-29 e B-03.2-30 (21 settembre 2026)
+
+- **B-03.2-29:** la fixture del test 0003 usa il formato storico (senza
+  `credential_hash`), `Principal` sintetico coerente e contesto RLS
+  conservato; `test_upgrade_0003_popolata_preserva_sequenze_e_alloca_la_successiva`
+  passa su PostgreSQL reale (messaggi 1/2 preservati, append 3,
+  `next_sequence` 4, RLS e grant ripristinati). Nessuna migrazione di
+  produzione modificata.
+- **B-03.2-30:** `normalize_display_name` è unica (solo strip dei margini,
+  spazi interni e case preservati, nessun case folding) ed è applicata in
+  `bootstrap_owner` e `login`. Nome vuoto dopo normalizzazione →
+  `InvalidName` (400 `INVALID_NAME`) in entrambi i confini, senza scritture
+  né tentativo di credenziale.
+- Migrazione `0006_owner_name_normalization`: trimma i soli record
+  `role = 'owner'` con la stessa regola dei casi d'uso (regex
+  `^\s+|\s+$`), mai a nome vuoto, senza cambiare ID, credenziale o altri
+  campi; idempotente (condizione `IS DISTINCT FROM`). `users` ha RLS con
+  FORCE: la migrazione disabilita la RLS solo attorno all'`UPDATE` e
+  ripristina subito ENABLE + FORCE (stesso pattern del backfill di 0004).
+  Downgrade no-op (i margini originali non sono conservati).
+- Test di integrazione `test_upgrade_0006_normalizza_nomi_owner_legacy` su
+  PostgreSQL reale: owner legacy `"  Ada Lovelace "` → `"Ada Lovelace"`,
+  ID/credential_hash/created_at intatti, record raggiungibile con il lookup
+  normalizzato (nessun owner orfano).
+- Test API: bootstrap con margini persiste il nome pulito (201, `display_name`
+  normalizzato); revoca + login con nome "sporco" raggiunge lo stesso owner;
+  solo whitespace → 400 `INVALID_NAME` in bootstrap e login, `bootstrapped`
+  resta `false`.
+- Gate: unit **132 passed**; integration **47 passed** (PostgreSQL
+  temporaneo, DB `newray_test`, nessun skip per DSN); Ruff, format, mypy
+  verdi.
+
+### Evidenze B-03.2-10 e B-03.2-18 (20 settembre 2026)
+
+- L'adapter legge e valida `done_reason`; EOF senza terminale, terminali
+  duplicati, chunk malformati e disconnessioni a metà body diventano
+  `InferenceFailed`, senza completion fittizia. Il catalogo/runtime assente
+  resta distinto dal guasto dopo l'avvio della generazione.
+- Decisione per la prima UI locale: la richiesta invia `think: false`.
+  Non esponiamo ragionamenti privati come contenuto né consumiamo
+  silenziosamente budget nel canale non ancora progettato per B-06.
+- Contratti offline: **34 passed** nella suite Ollama; gate backend precedente
+  al solo payload `think`: **164 passed, 39 skipped**, Ruff, format, mypy,
+  codegen e checker architettura verdi. La riesecuzione live con digest/GPU
+  appartiene a B-03.4.
+
+### Evidenze B-03.2-08 e B-03.2-09 (20 settembre 2026)
+
+- Il provisioning usa esclusivamente `NEWRAY_DEFAULT_MODEL_NAME`, validato
+  come tag Ollama completo; una configurazione differente vale soltanto per
+  un nuovo seeding. I binding/versioni già persistiti restano immutabili:
+  non esiste un aggiornamento in-place e il futuro editor dovrà creare
+  esplicitamente binding e `ProfileVersion` nuovi.
+- La risoluzione restituisce gli ID di `ProfileVersion` e `ModelBinding`, il
+  digest obbligatorio dell'artefatto e una copia profonda, JSON-serializzabile
+  e non mutabile dei parametri. Un catalogo che non comunica il digest
+  restituisce `MODEL_UNAVAILABLE`, mai uno snapshot eseguibile ambiguo.
+- Il contratto HTTP espone quegli ID e rigenera `contracts/openapi.json` e
+  `web/src/shared/contracts/api.d.ts`; al confine HTTP le strutture immutabili
+  sono convertite di nuovo in JSON ordinario. Nessun contratto è editato a mano.
+- Prove offline: **30 passed** (profiles + API HTTP), Ruff, format e mypy
+  verdi; codegen eseguito e `--check` senza drift. Il test PostgreSQL di R07
+  ora copre anche round-trip di parametri annidati, digest e ID; richiede il
+  cluster sacrificabile opt-in e non è stato avviato in questa sessione.
+
+### Evidenze B-03.2-06 (20 settembre 2026)
+
+- `NEWRAY_PUBLIC_ORIGIN` è l'unica origine WebUI/API consentita: viene
+  validata come origin HTTP(S) priva di path/credenziali e normalizzata.
+  Il bind loopback richiede un'origine loopback; un bind non-loopback richiede
+  insieme cookie `Secure` e origine HTTPS, quindi `0.0.0.0` più il solo cookie
+  non può più autorizzare l'avvio.
+- Il middleware HTTP confronta `Host` per tutte le richieste e `Origin` per
+  POST/PUT/PATCH/DELETE prima delle route. Origin assente o estraneo e Host
+  estraneo ricevono 403 `ACCESS_DENIED`: bootstrap e revoca non possono avere
+  effetti. Non vengono aperti CORS né origini multiple per l'API autenticata.
+- Prove offline: 33 test mirati settings/API, inclusi host/origin ostili e
+  revoca, tutti verdi. La verifica di un reverse proxy TLS reale resta
+  deliberatamente fuori dalla modalità personale e sarà richiesta prima di
+  una configurazione ufficio/proxy.
+
+### Evidenze B-03.2-11 — chiusura (20 settembre 2026)
+
+- Proprietari: `modules/profiles/application.py`, `bootstrap/api.py`,
+  `bootstrap/wiring.py`, `bootstrap/settings.py` e
+  `infrastructure/database/engine.py`. Il principal resta quello risolto
+  server-side; ogni repository riceve lo scope esistente. Nessun nuovo dato
+  persistente, cache, evento o export; API e snapshot compatibili.
+- `list_profiles` e `resolve_binding` eseguono tutto il blocco DB sincrono
+  tramite `asyncio.to_thread`, quindi consultano il catalogo una sola volta.
+  Seeding/letture/binding terminano prima dell'attesa di rete; digest e
+  capacità dello snapshot provengono dalla stessa lettura del catalogo.
+  Le route identity/conversations e la dipendenza del principal erano già
+  sincrone, eseguite da FastAPI fuori dal ciclo eventi.
+- `build_app` alloca nel lifespan un solo engine per identity/conversations/
+  profiles. I builder ricevono l'engine, senza crearne altri. `AsyncExitStack`
+  dispone il pool fuori dal ciclo eventi e chiude il client Ollama su shutdown
+  e setup fallito; se `aclose` fallisce il dispose viene comunque eseguito.
+  Costruzione app/OpenAPI non apre risorse. Il percorso `create_app` iniettato
+  chiude il client anche se il corpo del lifespan solleva un'eccezione.
+- Default: pool 5 connessioni per processo, overflow 0, attesa pool 3 s,
+  connect 3 s, statement 10 s, lock 3 s, transazione inattiva 15 s. Settings
+  validati e documentati; zero respinto e lock non oltre statement. Sono
+  limiti DB, non la deadline totale del run, ancora responsabilità B-04/B-05.
+  La cancellazione del consumer non interrompe il thread SQL: la sua attesa
+  resta soggetta ai timeout PostgreSQL. Nessun retry aggiunto.
+- Regressioni: `tests/unit/test_resource_lifecycle.py` copre pool finito,
+  impostazioni invalide, unico engine, guasti costruzione client/profili,
+  errore di shutdown e cleanup. I test profili contano una lettura catalogo
+  sia per tre profili sia per la risoluzione. Contratto HTTP con repository
+  sospeso verifica una seconda richiesta senza aspettare la prima.
+- Prove reali in `tests/integration/test_database_limits.py` e
+  `test_api_profiles.py`: statement `pg_sleep` interrotto (57014), lock in
+  attesa interrotto (55P03), esaurimento pool senza overflow, rollback e
+  connessione riutilizzabile senza residui di scope; mentre il binding è
+  bloccato su un lock PostgreSQL, `/models` risponde prima del rilascio.
+- Controlli: backend **190 passed, 43 skipped** offline; suite integration
+  **41 passed** su PostgreSQL **18.6 + pgvector 0.8.6**, cluster effimero e
+  soli database `newray_it_*`/sentinella creati dalle fixture. Nessun DB
+  operativo usato. Ruff lint/format, mypy (57 sorgenti), architettura e
+  codegen `--check` verdi. Due deprecation warning preesistenti di
+  Starlette/httpx/AnyIO; nessuna qualifica live dei modelli.
+- Regressione avvio reale: **8 test launcher verdi** (7 offline + smoke
+  PostgreSQL/API/Vite), compresi primo avvio, riuso senza duplicati,
+  shutdown e riavvio con sessione conservata. Test asyncio/thread e socket
+  eseguiti fuori dal sandbox dopo il blocco osservato nella sua chiusura
+  dell'executor. Nessuna dipendenza aggiunta. Guida runtime, README backend
+  e istruzioni backend aggiornati al ciclo di vita implementato.
+
+### Evidenze B-03.2-12 (20 settembre 2026)
+
+- `scripts/check_architecture.py` ora rifiuta core→adapter dello stesso
+  modulo, core→infrastructure, adapter→interfaces, `pydantic_settings` e
+  `requests` fuori dai layer autorizzati. I file Python non classificabili
+  sono un errore, salvo il solo `newray/__init__.py` di package.
+- La policy sugli import dinamici è esplicita e conservativa: `__import__` e
+  `importlib.import_module` sono vietati. Non fingiamo di ricostruire un
+  grafo dinamico; un'eccezione futura richiederà una decisione e una prova
+  dedicate.
+- Cinque test negativi stdlib in `scripts/tests/test_check_architecture.py`
+  coprono i nuovi divieti; checker sulla sorgente corrente verde. Il job CI
+  specifico per quei test resta nel ticket B-03.2-21.
+
+### Evidenze B-03.2-38 — chiusura (23 settembre 2026)
+
+- La prova concorrente del writer PostgreSQL è stata qualificata su
+  PostgreSQL reale (18.6, cluster su 127.0.0.1:5433, database sacrificale
+  `newray_it_*` creato e rimosso dalla fixture). Nessun modello è stato
+  caricato: il catalogo di test è `InMemoryModelCatalog` e la suite
+  `tests/live` (Ollama) non è stata eseguita, per vincolo esplicito.
+- `test_switch_model_due_scritture_concorrenti_una_sola_vince`: due
+  scritture parallele con la stessa `expected_profile_version` serializzate
+  nel writer; una sola vince, l'altra perde sulla violazione del vincolo
+  `UNIQUE` (barriera SQL, non un lock di riga). **PASSED**.
+- Suite di verifica (tutte senza modello live):
+  - offline `tests/unit` + `tests/contracts`: **299 passed**;
+  - `tests/integration` su PostgreSQL reale: **63 passed, 0 skipped**
+    (la qualifica precedente era 60 integration/live skipped senza DB);
+  - `test_api_profiles.py`: **7 passed**, incluso il test concorrente;
+  - `ruff check`, `ruff format --check` (111 file), `mypy` (66 file),
+    `generate_contracts.py --check` (drift=0), `check_architecture.py`
+    (66 file, confini coerenti) verdi;
+  - `scripts/tests/test_check_architecture.py` e
+    `scripts/tests/test_local_models.py` OK;
+  - `web/npm run check` verde (63 test, budget JS 385.7 KB / CSS 25 KB).
+- Correzione di regressione introdotta dal consolidamento: `ruff format`
+  su `tests/integration/test_rls_identity.py:344` (chiamata `set_config`
+  riformattata su una riga). Nessun cambiamento di comportamento.
+- Limite esplicito: la qualifica concorrente qui è su PostgreSQL reale ma
+  con catalogo in memoria; la prova Ollama reale con digest/hardware resta
+  in B-03.4/B-09.3 e non è stata eseguita in questa sessione.
+
+### Avanzamento B-03.2-13 (20 settembre 2026)
+
+- `IdentityPage` ora passa separatamente al pannello gli stati di bootstrap e
+  revoca: un fallimento del bootstrap non-409 resta nel form con il nome
+  inserito e un retry pertinente; un fallimento della revoca conserva
+  l'identità mostrata, senza simulare un logout riuscito. I messaggi di
+  recupero sono chiavi i18n in italiano e inglese, non testo non localizzato
+  dell'errore di trasporto.
+- Durante ciascuna mutazione viene disabilitata solo l'azione corrispondente;
+  la route inoltre non avvia una seconda revoca quando la prima è pending.
+  Errori di bootstrap e revoca sono `role=alert`, ricevono focus quando
+  compaiono e il pulsante assume un'etichetta di stato/retry accessibile.
+- Vitest/Testing Library: 16 test verdi (8 pannello, 8 pagina), inclusi POST
+  500 al bootstrap, errore di revoca, retry, identità preservata, focus
+  dell'alert e controllo pending. `npm run check` verde: Prettier, ESLint,
+  TypeScript strict, test, licenze, build e budget (JS 303,8 KB, CSS 2,3 KB).
+- Limite esplicito: non esiste ancora il runner Playwright richiesto da B-09;
+  la verifica in browser reale di tastiera/schermo stretto resta necessaria
+  prima di chiudere il ticket. Login, scadenza, timeout e invalidazione di
+  cache restano rispettivamente B-03.2-14 e B-03.2-26.
+
+### Avanzamento B-03.2-17 (20 settembre 2026)
+
+- `.start --web` legge ora un eventuale `.env` locale con parser ristretto a
+  assegnazioni `NEWRAY_CHIAVE=valore`: non interpreta il file come script.
+  Il nuovo `.env.example` separa esplicitamente i DSN di `newray_app` e
+  `newray_migrate`, senza credenziali reali; README e guida runtime riportano
+  il percorso aggiornato e la codifica URL delle password riservate.
+- Lo script configura l'origine canonica della WebUI Vite e usa il suo Host
+  nel probe dell'API, coerentemente con il middleware same-origin; verifica
+  inoltre, prima delle migrazioni, che PostgreSQL sia raggiungibile e indica
+  porta e passo di recupero senza stampare DSN o password.
+- Prove locali: `bash -n .start`; con DSN assenti viene mantenuto il rifiuto
+  esplicito, con DSN sintetici il preflight arriva al nuovo messaggio
+  `PostgreSQL non risponde su 127.0.0.1:5432`. Nessun database è stato creato,
+  migrato o modificato. Rimangono da qualificare Compose, password con casi
+  limite, utente non-root, healthcheck e smoke reale del ticket.
+
+### B-03.2-17 — Avvio personale automatico (20 settembre 2026)
+
+Richiesta successiva dell'utente: `.start` deve controllare i servizi e avviare
+quelli mancanti, con configurazione minima. Questo avanzamento sostituisce il
+precedente obbligo di preparare manualmente DSN e database per l'avvio personale.
+Proprietario: tooling locale (`.start`, `scripts/start_local.py`), con proxy
+Vite. Principal operativo: utente Linux corrente; l'identità applicativa è
+ancora creata dalla WebUI. Nessun nuovo endpoint o contratto dati applicativo.
+
+- `./.start --web` (anche senza argomenti) sincronizza uv dal lockfile e
+  installa npm con `ci --ignore-scripts` quando necessario. Richiede uv,
+  Node/npm e PostgreSQL/pgvector già installati; su questa macchina disponibili.
+  Non dipende dal daemon Docker. Le configurazioni `.env` restano opzionali,
+  lette letteralmente, con precedenza alle variabili esportate.
+- Senza DSN crea un cluster privato in `NEWRAY_DATA_DIR/launcher` fuori dai
+  sorgenti, password casuali persistenti in file 0600, autenticazione SCRAM,
+  bind loopback e tre ruoli separati. Avvia/riusa il cluster e applica Alembic
+  con il migratore; verifica che app non sia owner/superuser/BYPASSRLS. Un
+  lock serializza il provisioning. Stato parziale non viene cancellato e
+  credenziali mancanti su cluster esistente richiedono ripristino.
+- Readiness verifica schema NewRay, endpoint sessione, HTML della WebUI e
+  API attraverso il proxy; gestisce porte personalizzate e origine canonica.
+  Riusa servizi compatibili, segnala porte estranee, non migra mentre un'API
+  esistente serve uno schema obsoleto. Ctrl-C/fallimento pulisce solo i gruppi
+  di processi creati da questa invocazione. PostgreSQL conserva dati e resta
+  disponibile. Nessuna credenziale migratore viene passata al processo API;
+  il frontend riceve solo le opzioni pubbliche del launcher.
+- Ollama configurato e spento su loopback IPv4 viene avviato tramite lo script
+  di isolamento GPU esistente; nessun modello scelto o scaricato. Database
+  espliciti e runtime remoti sono verificati, ma l'avvio del loro servizio
+  resta responsabilità del gestore esterno: non vengono sostituiti da uno
+  storage vuoto. Nessuna qualifica GPU/live modello dedotta da questa prova.
+- Corretto l'escape `%` nel percorso Alembic online per DSN con password
+  URL-encoded; regressione con credenziale sintetica contenente `@`, `%` e
+  apice, intercettata prima della connessione. `.dockerignore` esclude env,
+  script ambiente test e runtime locali dal contesto di build.
+- Prove realmente eseguite: `scripts/tests/test_start_local.py`, **7 test
+  offline + 1 smoke live** opt-in (`NEWRAY_LIVE_START_TEST=1`), PostgreSQL
+  **18.6**, pgvector locale, Python 3.12, Node 26.8.2, Vite 6.4.3. Smoke da
+  CWD `/tmp` con porte e directory temporanee: primo provisioning, bootstrap
+  sintetico via proxy, secondo avvio senza duplicati, SIGTERM, stop/riavvio
+  PostgreSQL, stessa identità e cookie ancora utilizzabili. Il test ignora
+  `.env` personale mediante `NEWRAY_ENV_FILE` isolato e pulisce il solo cluster
+  creato. Nessun dato utente necessario.
+- Gate: `bash -n`, Ruff lint/format sui nuovi script e su Alembic, **13 test**
+  precedenza/fixture migrazioni, `web/npm run check` (**16 test**, build,
+  licenze e budget) tutti verdi. Aggiunto step CI per i contratti offline
+  del launcher; workflow remoto non eseguito. README, template e guida
+  runtime aggiornati. Il ticket complessivo resta in corso per i residui
+  Compose/container e i relativi gate di deployment.
+
+### Priorità UI affidabile con modelli locali (20 settembre 2026)
+
+Richiesta utente: rendere disponibile una prima chat locale nella WebUI senza
+presentare completamenti/troncamenti falsi, perdere dati privati al cambio
+identità o contendere la GPU di display. Questo riordino non riduce il gate:
+**B-04 resta dopo l'intero B-03.2** e B-03.3 resta prima di B-08.
+
+1. **Correttezza del modello — B-03.2-10, 18, 08 e 09.** Correggere prima
+   terminali `done_reason`, EOF e guasti stream; decidere il contratto
+   `thinking`; completare digest/versionamento e snapshot profondamente
+   immutabile. Senza questi punti la UI non può dire se una risposta è
+   completata, troncata o ancora in elaborazione, né legarla all'artefatto
+   esatto.
+2. **Sessione, origine e lifecycle — B-03.2-06, 14, 22, 11, 13, 26 e 15.**
+   Rendere le mutazioni same-origin/CSRF sicure, permettere il rientro dopo
+   logout/scadenza, chiudere cache e stream privati, evitare I/O DB bloccante
+   nelle route async e mostrare pending/errori/timeout recuperabili. Questo è
+   il minimo per provare la UI senza una sessione fragile o dati residui.
+3. **Gate e operazioni locali — B-03.2-12, 21, 17, 19, 20, 27, 28, 16 e 24.**
+   Chiudere i confini e i gate CI, deployment e strumenti di qualifica;
+   preservare l'isolamento della GPU AMD/NVIDIA e produrre rapporti affidabili
+   per ogni modello. Il disegno tool/gateway (16) precede qualsiasi effetto;
+   l'analisi indici (24) resta misurata, non anticipata.
+4. **Qualificazione live — B-03.4.** Dopo 10/18/19/20, rieseguire `base` e
+   qualificare gli altri tre GGUF solo con GPU AMD libera. “Importato” o
+   “misurato una volta” non equivale a qualificato.
+5. **Vertical slice per il primo test UI — B-04, B-05, B-06, B-07, B-03.3,
+   B-08, B-09.** Run persistente con snapshot e deadline, worker/lease,
+   SSE con replay, stop idempotente, migrazione Tailwind/shadcn, schermata
+   Conversazioni e infine browser E2E con due principal. Il primo test utente
+   è pronto solo alla chiusura di questa sequenza.
+
+Nessun nuovo ordine autorizza effetti esterni live; la qualifica dei modelli
+resta opt-in e identifica runtime, digest, GPU, contesto e corpus.
+
+### Riesame del 17 settembre 2026
+
+Richiesta dell'utente: analisi dello stato sviluppato, bug e migliorie con TODO
+tecnici e indicazione di ripresa. Consegnato il
+[rapporto](evidence/code-review-2026-09-17.md), con sonde offline, risultati JSON
+e manifest SHA-256; è una specifica/evidenza, non un secondo ledger.
+
+- **B-03.2-01 riaperto:** la precedenza del DSN è corretta, ma la fixture
+  `operational_database` esegue esplicitamente upgrade su `/newray`. Riprodotto
+  intercettando Alembic, senza connessione DB. Sostituire quel bersaglio con
+  una seconda sentinella sacrificabile e verificare anche revisione/dati.
+- **B-03.2-02 in lavorazione concorrente:** osservata l'introduzione di
+  `OwnerBootstrap`/adapter transazionale durante la revisione. Non sovrascritta
+  né qualificata da questa analisi; completare integrazione e prove pertinenti.
+- **B-03.2-08 parzialmente implementato:** settings/wiring/provisioning usano
+  `NEWRAY_DEFAULT_MODEL_NAME`; restano digest, normalizzazione e gestione
+  esplicita delle versioni/binding già presenti. Non rifare la parte già svolta.
+- Confermati con sonde: seeding parziale, snapshot mutabile, timeout omesso
+  disabilitato, terminali/guasti Ollama, origine non verificata, envelope 422
+  difforme e lacune del checker. Dettagli e limiti nel rapporto.
+- Aggiunti **20–21** per robustezza del rapporto di qualifica e gate degli
+  script. Nessuna correzione del prodotto implementata da questa revisione.
+- Verifiche iniziali: 133 backend passati/29 saltati, 11 frontend passati,
+  lint/format/tipi/build/licenze/budget, architettura e codegen senza drift;
+  2 test script passati. Gate eseguiti prima delle modifiche concorrenti a
+  identity; non qualificano automaticamente la working copy successiva.
+- Ripresa: completare B-03.2 dal residuo **01**, integrare il lavoro **02**,
+  poi seguire le dipendenze del rapporto. B-03.4 resta l'ultimo filone modelli
+  sviluppato, con misure parziali e difetti aperti; riprenderne la qualifica dopo
+  le correzioni. **B-04 è il prossimo incremento funzionale dopo il gate**.
+  B-03.3 rimane prima di B-08. Nessuna chiusura dedotta da questa revisione.
+
+### Evidenze B-03.2-01 (17 settembre 2026)
+
+- `migrations/urls.py` (nuovo): `resolve_database_url` con precedenza esplicita
+  (DSN iniettato > `NEWRAY_MIGRATION_DATABASE_URL` > `None`),
+  `database_name`/`is_disposable_database` (prefisso `newray_it_`) e costanti
+  `OPERATIONAL_ENV_VAR`/`DISPOSABLE_DB_PREFIX` come fonte unica.
+- `migrations/env.py`: risoluzione del DSN via modulo condiviso, caricato con
+  `importlib` dalla directory dello script (nessuna dipendenza da `sys.path`);
+  `RuntimeError` esplicito se né configurazione né variabile definiscono un
+  DSN. La variabile d'ambiente non dirotta più un bersaglio esplicito (R01).
+- `tests/integration/conftest.py`: `test_databases` isola
+  `NEWRAY_MIGRATION_DATABASE_URL` (`monkeypatch.delenv`) e, prima di
+  upgrade/downgrade, verifica nome, prefisso sacrificiale e ownership
+  (`pg_database`, atteso `newray_migrate`) del DB bersaglio; i messaggi di
+  errore non includono il DSN completo.
+- `tests/unit/test_alembic_env_precedence.py` (7 test, nessuna connessione):
+  precedenza provata eseguendo `alembic upgrade --sql` in offline e
+  intercettando `MigrationContext.configure` (iniettato vince sull'ambiente;
+  ambiente solo come fallback; `RuntimeError` senza DSN) più contratto puro di
+  `urls.py`.
+- `tests/integration/test_migrations.py`: `test_downgrade_rimuove_le_tabelle`
+  riacquista la variabile ambientale sul DB operativo; il downgrade sul DB
+  sacrificiale lo lascia intatto (tabelle e `alembic_version` invariati).
+- Controlli: offline `uv run pytest -q` 133 passed / 29 skipped; integration
+  `uv run pytest -q tests/integration` 27 passed (DSN di `.newray-test-env.sh`,
+  PostgreSQL reale); `ruff check`, `ruff format --check`, `mypy` (strict) e
+  `scripts/check_architecture.py` senza riscontri.
+
+### Evidenze B-03.2-01 — residuo chiuso (17 settembre 2026, sera)
+
+Il review del 17 settembre ha riaperto il ticket: la precedenza DSN era
+corretta ma la fixture `operational_database` chiamava esplicitamente
+`command.upgrade(head)` su un DSN fisso `…/newray`. Con un cluster locale
+che contiene un database operativo `newray`, la CI dei test lo migrava.
+
+- `tests/integration/conftest.py`: rimossa `operational_database` (scope
+  session); introdotta `sentinel_database` (scope funzione, prefisso
+  `newray_sentinel_<uuid>`, distinto da `DISPOSABLE_DB_PREFIX`). Il DB
+  viene creato dal superuser via `AUTOCOMMIT`, migrato a head e distrutto
+  in `try/finally` che copre anche il guasto di setup; l'engine admin è
+  disposto a fine test. Assert difensivi sulla non-sacrificialità del
+  bersaglio prima dell'upgrade: una regressione della guardia non farebbe
+  colpire un DB estraneo.
+- `tests/integration/test_migrations.py`: `test_downgrade_rimuove_le_tabelle`
+  consuma `sentinel_database`; ora verifica anche la `alembic_version`
+  della sentinella intatta prima/dopo, oltre ai nomi delle tabelle, per
+  intercettare una regressione che svuotasse i dati lasciando lo schema.
+- `tests/unit/test_integration_fixtures.py` (nuovo, 4 test offline):
+  intercetta `alembic.command.upgrade` e `sqlalchemy.create_engine` per
+  registrare bersagli e SQL senza aprire connessioni reali. Verifica che
+  la fixture non punti mai a `newray`, che il DROP colpisca solo il DB
+  creato, che il teardown pulisca anche dopo un guasto di upgrade
+  (`RuntimeError` iniettato) e che la vecchia fixture/nomi residui siano
+  spariti dal conftest e dai suoi consumer.
+- Controlli offline (questa sessione): `uv run pytest tests/unit tests/contracts`
+  142 passed (era 138 prima delle nuove sonde); `ruff check` e
+  `ruff format --check` sui file modificati verdi. Integration/RLS
+  PostgreSQL non riesegue in questa sessione: `NEWRAY_TEST_*_URL` non
+  impostate nell'ambiente corrente (macchina isolata dopo l'incidente GPU).
+  Andrà ripetuta prima di reintegrare in CI (comando invariato:
+  `uv run pytest tests/integration`).
+
+### Evidenze B-03.2-01 — residui finali chiusi (18 settembre 2026)
+
+Chiude i residui aperti dalla revisione del 17 settembre («usare il parser
+URL SQLAlchemy», «teardown che copra errori di setup», «riesecuzione
+integration su PostgreSQL»).
+
+- `migrations/urls.py`: `database_name` usa `sqlalchemy.engine.url.make_url`
+  invece di `rsplit`/`split`: credenziali, query string e driver non
+  influenzano più l'estrazione del nome.
+- `tests/integration/conftest.py`: `_with_database` costruito con
+  `make_url(...).set(database=...).render_as_string(hide_password=False)`
+  (mai concatenazione di stringhe); `test_databases` ristrutturata in
+  `try/finally` annidati: il `DROP DATABASE` copre anche i fallimenti di
+  setup (es. guasto di `command.upgrade`), l'engine temporaneo del database
+  fresco è disposto prima del rilascio della fixture e il DROP finale
+  colpisce solo il DB creato dalla fixture.
+- `tests/unit/test_integration_fixtures.py`: +2 sonde offline per
+  `test_databases` — nominale (upgrade solo sul DB sacrificiale coerente
+  col nome, DSN con parser URL intatto, DROP esatto alla chiusura del
+  yield) e fallimento di setup (`RuntimeError` iniettato in upgrade:
+  CREATE/DROP bilanciati sul nome creato, eccezione propagata).
+- PostgreSQL 18.6 + pgvector riavviato su 127.0.0.1:5433;
+  `tests/integration` rieseguita sul cluster reale: **33 passed**
+  (27/9: 27 passed, la suite è cresciuta con le prove RLS profili di
+  B-03.2-03/07). Downgrade su sentinella e prove concorrenti verdi.
+- Controlli offline: `uv run pytest -q` 146 passed / 35 skipped;
+  `ruff check`, `ruff format --check`, `mypy` strict (56 file) verdi;
+  `scripts/check_architecture.py` coerente (56 file);
+  `scripts/generate_contracts.py --check` senza drift.
+
+### Evidenze B-03.2-02 (17 settembre 2026)
+
+- `identity/ports.py`: nuova porta `OwnerBootstrap` (UoW) — persiste
+  organizzazione, proprietario e sessione in un solo passo atomico;
+  conflitto dell'owner → `Conflict` a transazione aperta, con rollback
+  completo (nessuna organizzazione orfana, nessun stato parziale).
+- `identity/application.py`: `IdentityService` riceve la porta come quarto
+  parametro; `bootstrap_owner` costruisce i record e delega alla porta;
+  `_build_session` (puro) separato da `_open_session` (save).
+- `identity/adapters/postgres.py`: `PostgresOwnerBootstrap` — una sola
+  transazione (`engine.begin`): contesto di scope dai record, INSERT
+  `organizations`, INSERT `users` con `ON CONFLICT ((0)) WHERE role = 'owner'
+  DO NOTHING`, `rowcount != 1` → `Conflict` (rollback), INSERT `sessions`.
+- `tests/fakes/__init__.py`: `InMemoryOwnerBootstrap` (vincolo verificato
+  prima di persistere, `Conflict` senza residui) e accessori di conteggio
+  `organization_count`/`user_count`/`session_count` per gli assert di stato.
+- Tutti i call site aggiornati (bootstrap wiring, contratti HTTP, integration
+  RLS); corrette anche le porzioni di edit concorrenti incomplete in
+  `tests/contracts/test_http_api.py` e tre file affini.
+
+**Verifica del 17 settembre, sera:** integrazione confermata sul codice
+corrente e completata su un residuo.
+
+- Codice: `IdentityService.__init__` accetta `bootstrap: OwnerBootstrap`
+  come 4° parametro posizionale; `bootstrap_owner` costruisce org/user/session
+  e delega a `self._bootstrap.execute(...)`. `PostgresOwnerBootstrap.execute`
+  usa `engine.begin()` — una sola transazione con INSERT `organizations`,
+  INSERT `users` (`ON CONFLICT ((0)) WHERE role='owner' DO NOTHING`), check
+  `rowcount != 1` → `Conflict` con rollback strutturale, INSERT `sessions`.
+  Il vincolo è l'indice `users_single_owner` in `migrations/0001_identity.py`.
+  `InMemoryOwnerBootstrap` verifica il vincolo prima di persistere: `Conflict`
+  senza residui, semantica coerente con l'adapter.
+- Test coprono i tre criteri di accettazione: `test_bootstrap_e_monouso`,
+  `test_conflitto_di_bootstrap_non_altera_il_vincente` (fake); fault injection
+  `test_guasto_del_passo_atomico_non_lascia_residui` (guasto pre-commit →
+  0 record, retry riesce, `tentativi == 2`); integration
+  `test_due_bootstrap_concorrenti_un_solo_vincente` (`threading.Barrier(2)` su
+  PostgreSQL reale: esattamente 1 Principal, 1 Conflict, conteggi come
+  superuser 1/1/1). Fault injection interno alla transazione Postgres non
+  aggiunto: `engine.begin()` è il pattern SQLAlchemy per l'atomicità, coperto
+  strutturalmente e da lettura statica.
+- **Residuo chiuso:** `scripts/generate_contracts.py` non era stato aggiornato
+  alla nuova firma (`IdentityService` senza `bootstrap`, `ProfileService` senza
+  `seeder`). `--check` falliva con `TypeError`. Il codegen ora costruisce
+  entrambi i servizi con i fake condivisi (`InMemoryOwnerBootstrap`,
+  `InMemoryProfileDefaultsSeeder`); la mancata scoperta durante l'edit
+  concorrente originale dipende dall'assenza del gate codegen prima del commit.
+- Controlli offline (questa sessione): `uv run pytest tests/unit tests/contracts`
+  142 passed; `python scripts/generate_contracts.py --check` nessun drift;
+  `python scripts/check_architecture.py` 56 file, coerente. Integration/RLS
+  PostgreSQL non riesegue: `NEWRAY_TEST_*_URL` non impostate. Riesecuzione
+  necessaria prima del prossimo consolidamento (comando invariato).
+- Test unitari (`tests/unit/test_identity_application.py`): conflitto non
+  altera il vincente; fault injection nel passo atomico → errore propagato,
+  zero residui (3 conteggi a 0), retry utile (secondo bootstrap valido).
+- Test integration (`tests/integration/test_rls_identity.py`):
+  `test_due_bootstrap_concorrenti_un_solo_vincente` — due
+  `bootstrap_owner` simultanei (thread, engine condiviso, DB fresco del
+  ruolo applicativo): esattamente un `Principal` e un `Conflict`; conteggio
+  come superuser = 1 per `organizations`/`users`/`sessions` (nessun record
+  orfano del perdente).
+- Controlli: offline `uv run pytest -q` 135 passed / 30 skipped; integration
+  `uv run pytest -q tests/integration` 28 passed (PostgreSQL reale, DSN di
+  `.newray-test-env.sh`); `ruff check`, `ruff format --check`, `mypy`
+  (strict, 56 file) e `scripts/check_architecture.py` senza riscontri.
+
+### Evidenze B-03.2-03 (17 settembre 2026, sera)
+
+Provisioning atomico dei profili chiuso sopra il lavoro concorrente lasciato
+a metà quando la macchina si è bloccata (14:04).
+
+- Codice: `ProfileService.__init__` riceve `seeder: ProfileDefaultsSeeder`
+  come porta obbligatoria; `ensure_defaults` verifica la completezza per
+  tipo (`set(AProfile)`, non «almeno uno») e delega al seeder passando
+  binding e coppie `(Profile, ProfileVersion)` desiderati. Il seeder
+  Postgres (`PostgresProfileDefaultsSeeder`) esegue una sola transazione
+  `engine.begin()` con INSERT `model_bindings` (`ON CONFLICT
+  (organization_id, owner_id, name) DO NOTHING`) + read-back, INSERT
+  `profiles` (`ON CONFLICT (organization_id, owner_id, kind) DO NOTHING`)
+  + read-back, INSERT `profile_versions` (`ON CONFLICT (profile_id,
+  version) DO NOTHING`) che referenzia gli ID **letti dal read-back**, non
+  quelli pre-generati dal chiamante — così un perdente della gara aggancia
+  le proprie versioni al binding/profile del vincente. `InMemoryProfileDefaultsSeeder`
+  segue la stessa semantica (check-and-reuse per nome/kind/versione).
+- Test unit (già presenti, `tests/unit/test_profiles_application.py`):
+  `test_seeding_idempotente` (seconda chiamata non duplica),
+  `test_guasto_del_seeding_non_lascia_residui_e_il_retry_riesce` (fault
+  injection nel passo atomico → 0 record, retry riesce),
+  `test_seeding_ripara_lo_stato_parziale_solo_binding`,
+  `test_seeding_ripara_profilo_senza_versione` (recupero da stato
+  parziale). Nessuno usa «esiste un profilo» come prova di completezza.
+- Test integration nuovi (`tests/integration/test_rls_profiles.py`,
+  completa i sei preesistenti):
+  `test_due_seeding_concorrenti_producono_stato_completo` — due
+  `ProfileService` con engine indipendenti condividono soltanto il DB,
+  gara con `threading.Barrier(2)`, entrambi lanciano `list_profiles(owner)`:
+  zero eccezioni, entrambe le viste con 3 profili completi (uno per tipo),
+  conteggi superuser 1/3/3, `DISTINCT model_binding_id FROM profile_versions`
+  restituisce esattamente una riga, ID profilo per tipo identici fra le
+  due viste. `test_seeding_ripara_binding_parziale_su_postgres` — con
+  binding preesistente ma nessun profilo, il servizio completa senza
+  duplicare il binding e aggancia tutte le versioni all'ID orfano riusato.
+- Drift lasciato dalla sessione interrotta e chiuso qui: `mypy` no-any-return
+  in `_read_back` (variabile intermedia tipizzata `uuid.UUID`), format
+  di `profiles/adapters/postgres.py` e `tests/unit/test_profiles_application.py`,
+  cinque import unused in `test_rls_profiles.py` ora tutti consumati dai
+  test aggiunti (`threading`, `Connection`, `RUNTIME_OLLAMA`,
+  `DEFAULT_BINDING_NAME`, `ModelBinding`).
+- Controlli offline (questa sessione): `uv run pytest tests/unit tests/contracts`
+  142 passed; `ruff check .` verde; `ruff format --check .` 90 file
+  conformi; `mypy` strict 56 file, nessun problema;
+  `scripts/generate_contracts.py --check` senza drift;
+  `scripts/check_architecture.py` 56 file coerente. Integration/RLS
+  PostgreSQL non riesegue: `NEWRAY_TEST_*_URL` non impostate; il nuovo
+  `test_due_seeding_concorrenti_producono_stato_completo` va eseguito prima
+  del successivo consolidamento (comando invariato:
+  `uv run pytest tests/integration/test_rls_profiles.py -k concorrenti`).
+
+### Evidenze B-03.2-07 (17 settembre 2026, sera)
+
+Unificato get/list sulla versione corrente in un'unica query SQL.
+
+- Codice: `PostgresProfileRepository` sostituisce `_select` con
+  `_select_latest`, che usa `DISTINCT ON (p.id) ... ORDER BY p.id,
+  v.created_at DESC, v.id DESC`. `list_profiles` restituisce le righe
+  senza dedup Python, `get_profile` restituisce `rows[0]` (l'unica riga
+  per il profilo indicato). Prima del fix `get_profile` restituiva la
+  versione più *vecchia* (`ORDER BY created_at ASC + rows[0]`) mentre
+  `list_profiles` calcolava il massimo lato applicazione — le tre letture
+  divergevano fra loro. `InMemoryProfileRepository` era già coerente
+  (`max((created_at, id))`), non richiede modifiche.
+- Test unit nuovi (`tests/unit/test_profiles_application.py`, 19/19):
+  `test_lista_e_lettura_singola_concordano_sulla_versione_corrente`
+  (list/get/resolve concordano su `1.1.0` con nuova versione più recente);
+  `test_pareggio_timestamp_risolto_con_id_come_tiebreaker` (due versioni
+  con lo stesso `created_at`, l'`id` maggiore vince — stesso contratto
+  del `ORDER BY v.id DESC` Postgres).
+- Test integration nuovi (`tests/integration/test_rls_profiles.py`):
+  `test_lista_e_lettura_concordano_sulla_versione_corrente` (aggiunge una
+  nuova versione con binding personalizzato, verifica che le tre letture
+  concordino sull'ID della nuova riga);
+  `test_pareggio_timestamp_risolto_da_id_su_postgres` (due nuove versioni
+  con `created_at` identico, l'id maggiore vince).
+- Controlli offline (questa sessione): `uv run pytest tests/unit tests/contracts`
+  144 passed (era 142 prima); tutti i gate meccanici verdi
+  (ruff/format/mypy/codegen/architecture). Integration/RLS non riesegue.
+- 18 settembre: prima esecuzione live di `test_lista_e_lettura_concordano_sulla_versione_corrente`
+  su PostgreSQL ha fallito — il test chiamava `resolve_binding` sul servizio
+  della fixture con `EmptyModelCatalog` (per contratto `MODEL_UNAVAILABLE`,
+  mai un fallback, ADR 0003). Corretto il test: il servizio di risoluzione
+  usa `InMemoryModelCatalog` con il modello `llama3.1`; la selezione della
+  versione resta l'oggetto della prova. `tests/integration` piena: 33 passed.
+
+### B-03.3 — Transizione a Tailwind CSS + shadcn/ui
+
+Decisione utente del 17 settembre, [ADR 0005](adr/0005-tailwind-shadcn.md).
+Stato: **completato il 21 settembre 2026**. Proprietario: web/shared/ui e
+composizione app/sessione. Dipendenza: coordinarsi con B-03.2-13 senza
+introdurre altri workflow.
+
+- [x] Inventariare App.module.css, IdentityPanel.module.css e tokens.css;
+  conservare gli stati della sessione, gli attributi ARIA e i breakpoint utili.
+- [x] Risolvere versioni stabili compatibili di Tailwind e plugin Vite,
+  toolchain shadcn e primitive necessarie; bloccare tutto nel lockfile,
+  registrare origine/licenze dei componenti copiati. Niente `@latest` in CI.
+  (tailwindcss@4.3.3, @tailwindcss/vite@4.3.3, shadcn@4.21.0, clsx@2.1.1,
+  tailwind-merge@3.7.0, class-variance-authority@0.7.1, lucide-react@1.47.0,
+  tw-animate-css@1.4.0, @radix-ui/react-slot@1.3.3, @radix-ui/react-label@2.1.15;
+  lightningcss aggiunto all'allowlist licenze — MPL-2.0.)
+- [x] Configurare Tailwind tramite plugin Vite, CSS globale dei token semantici,
+  alias TypeScript/Vite e components.json; indirizzare gli output shadcn verso
+  `src/shared/ui`, utility cn in shared/lib. shared non importa feature.
+- [x] Introdurre solo Button, Input, Label, Card, Alert e Skeleton necessari;
+  componenti posseduti dal repository, senza dipendenze cloud o CDN.
+- [x] Migrare shell e pannello sessione, preservando i18n it/en, caricamento,
+  signed-in/out, conflitto, pending, errori e recupero. Rimuovere CSS Modules
+  sostituiti; mantenere CSS globale per token/base e motivare eccezioni puntuali.
+  (IdentityPanel → BootstrapPanel + SettingsPanel; IdentityPage/LoginPage
+  migrati; nessun `.module.css` residuo.)
+- [x] Testare focus/tastiera, contrasto, schermi stretti, loading/errori e
+  regressioni di layout nel browser; mantenere separati cache server e stato UI.
+  (21/09: 18 e2e profilo `ui` verdi, incluso menu mobile 375px e focus
+  post-navigazione; 21 vitest verdi.)
+- [x] Eseguire npm ci --ignore-scripts e npm run check; verificare bundle e
+  licenze. Aggiornare README/AGENTS e rimuovere le istruzioni CSS ormai superate.
+  (21/09: gate verde — JS 352.7 KB / CSS 22.4 KB, budget 400/64; 637
+  pacchetti licenze ok; README e AGENTS aggiornati.)
+
+Accettazione: UI esistente integralmente migrata e navigabile, nessun doppio
+sistema per gli stessi componenti, gate verdi e prove browser datate. L'ADR
+adotta lo stack; questo ticket non è completato finché la migrazione non esiste.
+
+### Evidenze B-01 (16 settembre 2026)
+
+- Dominio (`backend/src/newray/modules/conversations/`): `Conversation`
+  (id, organization_id, owner_id, title 1–200, created_at, updated_at) e
+  `Message` (id, conversation_id, role user/assistant, content 1–50 000,
+  sequence, created_at); `MAX_TITLE_LENGTH`/`MAX_MESSAGE_LENGTH` come fonte
+  unica condivisa con i DTO; sequence assegnata dalla persistenza, mai
+  dall'applicazione.
+- Porte (`ports.py`): `ConversationRepository` (add/get/list keyset
+  `before=(updated_at, id)`/rename/delete) e `MessageStore` (append atomico
+  `MAX(sequence)+1` con `RETURNING`, list `after_sequence`); scope
+  obbligatorio in ogni metodo.
+- Applicazione (`application.py`): `ConversationService` (create, list con
+  cursore base64 `(updated_at|id)`, get, rename, delete, list_messages,
+  add_user_message); fuori scope → `NotFound` (nuovo errore kernel, 404, non
+  rivela l'esistenza); pagina default 50, max 200.
+- Adapter PostgreSQL (`adapters/postgres.py`): contesto di scope per
+  transazione (`set_config` locale); append con sequenza atomica protetta da
+  `UNIQUE (conversation_id, sequence)`.
+- Migration `migrations/versions/0002_conversations.py`: tabelle
+  `conversations` e `messages`; FK compositi come prima barriera dello
+  schema — `messages (conversation_id, owner_id) → conversations
+  (id, owner_id)` blocca a livello di vincolo le scritture
+  cross-principal — più `UNIQUE (id, organization_id)`/`(id, owner_id)` di
+  copertura e `UNIQUE (conversation_id, sequence)`; RLS ENABLE+FORCE su
+  entrambe le tabelle con policy `conversations_isolation`/
+  `messages_isolation`; grant DML a `newray_app` (mai CREATE); cascata
+  conversazioni → messaggi.
+- HTTP: 7 endpoint `/api/v1/conversations[...]` (lista a cursore,
+  creazione 201, lettura 200/404, rinomina 200, cancellazione 204, messaggi
+  con `after_sequence`/`next_sequence`, messaggio utente 201); il ruolo è
+  deciso dal server, mai dal payload; mapping `NOT_FOUND` → 404 in
+  `interfaces/http/errors.py`; `create_app(identity, conversations,
+  cookie_secure)` con parametro esplicito (nessun None), tutti i call site
+  aggiornati.
+- Bootstrap (`bootstrap/api.py` + `wiring.py`): `build_conversation_service`
+  con engine proprio, pattern identity.
+- Test: 13 unit sui casi d'uso (scope, pagina a cursore, sequenza per
+  conversazione, 404, limiti di dominio); 14 contratti HTTP (401 su tutti e
+  7 gli endpoint, 201/200/204/404/400/422, forma dei payload, cursore); 7
+  RLS su PostgreSQL reale con il ruolo applicativo (due principal nella
+  stessa org, org esterna, FORCE sul proprietario delle tabelle, default
+  deny senza contesto, sequenza persistita, `IntegrityError` su append in
+  conversazione altrui, cascata); 2 integration API→PG con il secondo
+  principal autenticato via cookie; `test_migrations.py` esteso a 0002
+  (tabelle, RLS, policy, vincoli, grant, downgrade).
+- Fake: `InMemoryConversationRepository` (scope imposto in codice, keyset) e
+  `InMemoryMessageStore` (sequenza per conversazione) in `tests/fakes/`.
+- Contratti rigenerati: `contracts/openapi.json` e
+  `web/src/shared/contracts/api.d.ts` via `scripts/generate_contracts.py`
+  (`--check` OK).
+- Controlli eseguiti: `uv run pytest` 85/85 con i tre DSN
+  `NEWRAY_TEST_*_URL` su PostgreSQL 18.6 (66 offline + 19 integration,
+  incluso l'upgrade/downgrade delle migrazioni su database fresco per test);
+  `uv run ruff check .` + `ruff format --check .` + `uv run mypy` puliti
+  (42 file sorgente); `scripts/check_architecture.py` exit 0; `web/
+  npm run check` 11/11 con budget bundle rispettati.
+- Criterio di uscita coperto: migrazione con RLS (prova su PostgreSQL
+  reale, non fake), CRUD conversazioni/messaggi con sequenza server-side,
+  scope verificato con due principal su PostgreSQL reale (RLS + API).
+- Limiti: i messaggi dell'assistente non hanno ancora un percorso di
+  ingresso (entrambero dal worker dei run, B-04/B-05, sulla stessa porta di
+  persistenza); nessuna WebUI di conversazione (B-08); due engine SQLAlchemy
+  (uno per servizio) come in A-03/A-07 — pooling in produzione resta fuori
+  scope di questa fase.
+
+### Evidenze B-02 (16 settembre 2026)
+
+- Dominio (`backend/src/newray/modules/profiles/domain.py`): `ModelStatus`
+  (installed/compatible/qualified, NewRay.md §9.1), `ModelInfo` (name,
+  runtime, digest, status, capabilities), `Profile` (scope, kind,
+  display_name), `ProfileVersion` (versione, binding, istruzioni,
+  created_at), `ModelBinding` (nome 1–100, runtime, model_name, parameters),
+  `ResolvedBinding` (frozen: snapshot riproducibile) e `ProfileView`;
+  costanti `DEFAULT_MODEL_NAME` ("llama3.1"), `DEFAULT_BINDING_NAME`
+  ("local-default"), `DEFAULT_PROFILE_VERSION` ("1.0.0"),
+  `RUNTIME_OLLAMA`. Il dominio non importa provider, framework o SQL.
+- Porte (`ports.py`): `ProfileRepository` (list/get restituiscono
+  `tuple[Profile, ProfileVersion]`; versione corrente = max per
+  `(created_at, id)`, stesso criterio nel fake e nell'adapter),
+  `ModelBindingStore` e `ModelCatalog` (senza scope: stato del runtime, non
+  dati privati).
+- Applicazione (`application.py`): `ProfileService` con `ensure_defaults`
+  (seeding idempotente: binding di default + un profilo per tipo con
+  versione 1.0.0, istruzioni esplicite per tipo), `list_profiles`
+  (self-healing: lo stesso seeding alla prima lettura, la route bootstrap
+  identity resta intatta), `list_models`, `resolve_binding` →
+  `ResolvedBinding`. Fuori scope → `NotFound` (404); modello assente dal
+  catalogo → `ModelUnavailable` (`MODEL_UNAVAILABLE`, 503, retryable
+  False) — nessun fallback invisibile (ADR 0003).
+- Adapter PostgreSQL (`adapters/postgres.py`): contesto di scope per
+  transazione (`set_config` locale), JOIN profili/versioni con versione
+  corrente, JSONB dei parametri (stringa in scrittura, dict in lettura).
+- `EmptyModelCatalog` (`adapters/models.py`): catalogo vuoto onesto per il
+  bootstrap di produzione — `/models` vuoto e `model: null` finché l'adapter
+  Ollama (B-03) non fornisce lo stato reale.
+- Migration `migrations/versions/0003_profiles.py`: tabelle `profiles`,
+  `profile_versions`, `model_bindings`; FK compositi come prima barriera
+  dello schema (`(profile_id, owner_id) → profiles (id, owner_id)`,
+  `(model_binding_id, owner_id) → model_bindings (id, owner_id)`);
+  `UNIQUE (organization_id, owner_id, kind)` rende il seeding sicuro in
+  concorrenza, `UNIQUE (profile_id, version)`; RLS ENABLE+FORCE con policy
+  di isolamento; grant a `newray_app` solo SELECT/INSERT (immutabilità a
+  livello di privilegio: né UPDATE né DELETE).
+- HTTP: 3 endpoint — `GET /api/v1/profiles` (`{items}`, `model: null` se
+  assente), `GET /api/v1/models`, `GET /api/v1/profiles/{id}/binding`
+  (snapshot); mapping `MODEL_UNAVAILABLE` → 503 in
+  `interfaces/http/errors.py`; `create_app(identity, conversations,
+  profiles, cookie_secure)` con parametro esplicito, tutti i 6 call site
+  aggiornati.
+- Bootstrap (`bootstrap/api.py` + `wiring.py`): `build_profile_service` con
+  engine proprio, pattern identity.
+- Test: 12 unit sui casi d'uso (seeding idempotente, isolamento scope,
+  snapshot ripetibile e immutabile, `MODEL_UNAVAILABLE` recuperabile, 404,
+  versione più recente, validazione dominio); 9 contratti HTTP (401 su
+  tutti e 3 gli endpoint, 200/404/503, forma dei payload); 6 RLS su
+  PostgreSQL reale con il ruolo applicativo (due principal nella stessa org
+  con ID esatti invisibili l'uno all'altro, org esterna, FORCE sul
+  proprietario, default deny senza contesto, FK composito che blocca una
+  versione cross-principal); 2 integration API→PG con il secondo principal
+  autenticato via cookie; `test_migrations.py` esteso a 0003 (tabelle,
+  RLS, policy, vincoli, grant immutabili, downgrade).
+- Fake: `InMemoryProfileRepository`, `InMemoryModelBindingStore` e
+  `InMemoryModelCatalog` in `tests/fakes/` (verificano il contratto, non la
+  qualità live).
+- Contratti rigenerati: `contracts/openapi.json` e
+  `web/src/shared/contracts/api.d.ts` via `scripts/generate_contracts.py`
+  (`--check` OK).
+- Controlli eseguiti: `uv run pytest` 114/114 con i tre DSN
+  `NEWRAY_TEST_*_URL` su PostgreSQL 18.6 (87 offline + 27 integration,
+  incluso l'upgrade/downgrade di 0003 su database fresco per test);
+  `uv run ruff check .` + `ruff format --check .` + `uv run mypy` puliti
+  (49 file sorgente); `scripts/check_architecture.py` exit 0 (49 file);
+  `web/npm run check` 11/11 con budget bundle rispettati.
+- Criterio di uscita coperto: risoluzione esplicita con snapshot
+  riproducibile (`ResolvedBinding` frozen con digest e capacità),
+  `/profiles` e `/models`, errore recuperabile se il modello manca
+  (503 `MODEL_UNAVAILABLE`, mai fallback).
+- Limiti: `/models` vuoto e `model` sempre `null` finché B-03 non fornisce
+  l'adapter Ollama (`NEWRAY_OLLAMA_BASE_URL`); le versioni di profilo sono
+  quelle di default — nessuna API di versioning finché l'editing dei
+  profili non è un caso d'uso; `model_artifact` resta al catalogo live,
+  non duplicato in DB.
+
+### Evidenze B-03 (16 settembre 2026)
+
+- Modulo proprietario `modules/models/` (structure.md §5.1). Dominio
+  (`domain.py`): `ModelInfo`, `ModelStatus`, `RUNTIME_OLLAMA`,
+  `DEFAULT_MODEL_NAME` e `MAX_MODEL_NAME_LENGTH` migrati da profiles (che li
+  riferisce, non li riduce); nuovi `ChatRole`, `ChatMessage` (contenuto
+  1–50 000), `ChatRequest` (modello e runtime espliciti, mai inferiti —
+  ADR 0003; `parameters`, `max_tokens` ≥ 1, `timeout`), `ContentDelta`,
+  `Completion` (finish_reason; conteggi token `None` se il runtime non li
+  fornisce), `StreamEvent = ContentDelta | Completion`. Il dominio non
+  importa provider, framework o SQL.
+- Porte (`ports.py`): `ModelCatalog` resa **async** — evoluzione esplicita
+  del contratto B-02: il runtime di inference è un servizio di rete, non un
+  valore locale; `ChatModel.stream(request) -> AsyncIterator[StreamEvent]`
+  con cancellazione = terminazione dello stream.
+- Adapter Ollama (`adapters/ollama.py`): `OllamaModelCatalog` su
+  `GET /api/tags` (stato onesto §9.1: `installed`, nessun capability;
+  runtime irraggiungibile → `[]`, timeout → `InferenceTimeout`, 4xx/5xx o
+  risposta non valida → `InferenceFailed`); `OllamaChatModel` su
+  `POST /api/chat` NDJSON (`ContentDelta` per chunk, `Completion` alla riga
+  `done`; `options` = parameters + `num_predict` da `max_tokens`; 404 o
+  irraggiungibile → `ModelUnavailable`, 4xx/5xx/`error` nel flusso/riga non
+  valida → `InferenceFailed`, timeout in connessione o a metà stream →
+  `InferenceTimeout`; lo stream è chiuso nel `finally`, quindi la
+  cancellazione rilascia la connessione). `EmptyModelCatalog`
+  (`adapters/empty.py`) reso async. `public.py` + `__init__.py` unico punto
+  di import.
+- Kernel (`kernel/errors.py`): `InferenceFailed` (`INFERENCE_FAILED`, non
+  retryable) e `InferenceTimeout` (`INFERENCE_TIMEOUT`, retryable) accanto a
+  `ModelUnavailable`.
+- `infrastructure/network.py`: `HttpClient` (un solo base URL, timeout
+  espliciti, `get_json` → `Response(status_code, data)`, `post_stream` →
+  `StreamedResponse` con `lines()`/`text()`/`aclose()` e
+  `read_timeout` per richiesta iniettata da `build_request`), errori di
+  trasporto `NetworkUnreachable`/`NetworkTimeout`. È l'unico punto httpx:
+  `scripts/check_architecture.py` aggiornato ad autorizzare httpx in
+  `infrastructure` (resterà vietato negli adapter e altrove).
+- Refactor `modules/profiles/`: tipi modello e `ModelCatalog` importati da
+  `models`; `list_profiles`/`list_models`/`resolve_binding`/`_view` resi
+  async; `adapters/models.py` eliminato; `public.py`/`__init__.py` senza i
+  nomi migrati.
+- Bootstrap: `Settings.ollama_base_url` (http/https con host, validato);
+  `build_ollama_client(settings)` (client `None` senza URL → nessun runtime
+  collegato), `build_model_catalog(client)` (Ollama se collegato, Empty
+  altrimenti), `build_profile_service(settings, catalog)`; `create_app(...,
+  ollama_client=None)` chiude il client in modo ordinato nel lifespan.
+- HTTP: `INFERENCE_FAILED` → 502, `INFERENCE_TIMEOUT` → 504 (unico codice
+  retryable) in `interfaces/http/errors.py`; route profili async; DTO senza
+  cambi di forma. Nessun endpoint nuovo: OpenAPI invariato.
+- Test: 14 unit sul dominio models (invarianti di costruzione, immutabilità,
+  ruoli stabili); 18 contratti sull'adapter con trasporto in memoria
+  (`httpx.AsyncClient` iniettato, `httpx.AsyncByteStream` controllato:
+  NDJSON multi-chunk, payload con `stream` e `options`/`num_predict`,
+  404/500/irraggiungibile/timeout, timeout a metà stream, `error` nel
+  flusso, riga non valida, conteggi assenti, cancellazione che interrompe
+  il flusso e rilascia la connessione); 2 live opt-in (`tests/live/`, skip
+  senza `NEWRAY_LIVE_OLLAMA_BASE_URL`/`_MODEL`/`_DIGEST`, assert sul digest
+  dichiarato); `InMemoryModelCatalog` async nei fake; test profili unit e
+  RLS aggiornati a `asyncio.run`.
+- Controlli eseguiti: `uv run pytest` 146/146 con i tre DSN
+  `NEWRAY_TEST_*_URL` su PostgreSQL 18.6 (119 offline: 61 unit + 58
+  contracts; 27 integration; i 2 live sono opt-in e saltano senza
+  configurazione); `uv run ruff check .` + `ruff format --check .` +
+  `uv run mypy` puliti (56 file sorgente); `scripts/check_architecture.py`
+  exit 0 (56 file); `scripts/generate_contracts.py --check` OK senza
+  rigenerazione (nessun endpoint nuovo); `web/npm run check` 11/11 con
+  budget bundle rispettati.
+- Criterio di uscita coperto: stream di contenuti (NDJSON → eventi di
+  dominio), cancellazione (chiusura dello stream rilascia la connessione),
+  limiti applicati al runtime (`options`/`num_predict`, `read_timeout`),
+  errori tipizzati con codici stabili e mapping 404/502/503/504; suite di
+  contratto senza rete; live opt-in con modello e digest dichiarati.
+- Limiti: nessun consumer di `OllamaChatModel` ancora: il bootstrap non
+  espone `build_chat_model` e la chat non ha endpoint HTTP — il worker dei
+  run (B-04/B-05) comporrà l'adapter con lo snapshot di
+  `resolve_binding`; la qualità generativa non è provata dalla suite
+  ordinaria (Ollama assente in questo ambiente, live opt-in); la
+  riconciliazione degli esiti incerti e la persistenza dei run restano in
+  B-04.
+
+### Evidenze B-03.2-14 (20 settembre 2026)
+
+- Proprietari: `backend/src/newray/kernel/crypto.py` (nuovo — PBKDF2-HMAC
+  SHA-256, 600k iterazioni, formato canonico autodescrittivo, nessuna
+  nuova dipendenza runtime), `backend/src/newray/modules/identity/`
+  (domain/ports/application/adapter aggiornati), migrazione
+  `0005_identity_credentials.py` (colonna `credential_hash TEXT NULL`
+  + policy `users_owner_lookup` USING role='owner' AND
+  `app.owner_lookup='true'`), route `POST /session/login`, `GET
+  /session/status`, `POST /session` (bootstrap con credenziale
+  obbligatoria); web: `features/session/useSession.ts` (`useLogin`,
+  cache client azzerata al logout), `useSessionStatus.ts`,
+  `LoginPanel.tsx`, `LoginPage.tsx`, `IdentityPage.tsx` (redirect
+  automatico a `/login` quando signed-out + bootstrappato).
+- Errori nuovi con codici stabili: `INVALID_CREDENTIALS` (401,
+  collassa "utente sconosciuto" e "credenziale sbagliata" per non
+  fornire oracolo di enumerazione, §19.4), `CREDENTIAL_NOT_SET` (409,
+  segnala l'owner pre-migrazione al percorso di recupero locale, mai
+  ricreazione silenziosa dell'owner).
+- Isolamento cache al cambio identità: `useRevoke.onSuccess` chiama
+  `queryClient.clear()`, non solo `invalidate` sulle chiavi identity.
+  Nessun dato del proprietario appena disconnesso resta consultabile
+  da un successivo login.
+- Prove: `pytest tests/unit tests/contracts` **212 passed** offline
+  (16 nuovi: 10 in `test_crypto.py` + 6 in `test_identity_application.py`
+  + 5 in `test_http_api.py` per status/login/bootstrap con credenziale);
+  Ruff lint/format e mypy verdi (57 file sorgente); checker architettura
+  verde (58 file); `generate_contracts.py --check` verde (contratti
+  rigenerati con nuovi DTO `LoginRequest`, `SessionStatusDTO`, campo
+  `credential` in `BootstrapRequest`); web `npm run check` verde
+  (Vitest 17/17, licenze 341, budget bundle JS 309,2 KB / CSS 2,7 KB);
+  `npm run e2e` **12/12 verdi in 12,6 s** su Chromium Headless Shell,
+  inclusi i tre nuovi scenari `bootstrap→logout→login`,
+  `signed-out + bootstrappato → redirect a /login`,
+  `login INVALID_CREDENTIALS` e `login CREDENTIAL_NOT_SET`.
+- Integration PostgreSQL: aggiunti tre test in
+  `tests/integration/test_rls_identity.py`
+  (`test_lookup_owner_richiede_flag_di_transazione`,
+  `test_lookup_owner_non_espone_membri_non_owner`,
+  `test_login_reale_apre_una_nuova_sessione`). **Non eseguiti in questa
+  sessione**: PostgreSQL non attivo sulla macchina; da rieseguire con i
+  DSN `NEWRAY_TEST_*_URL` al prossimo giro con cluster disponibile.
+- Limiti: il percorso di recupero per un owner pre-migrazione (colonna
+  `credential_hash IS NULL`) è dichiarato dall'endpoint di login con
+  `CREDENTIAL_NOT_SET`; il comando CLI che imposta la credenziale è
+  ancora un TODO — l'utente attuale non ha owner reali in questa
+  situazione secondo l'evidenza storica. Correzione del 21 settembre:
+  il percorso unknown salta la verifica PBKDF2, quello wrong-password
+  la esegue; l'uguaglianza temporale prima dichiarata non è dimostrata
+  ed è contraddetta dai percorsi di codice. B-03.2-31 copre il residuo;
+  CREDENTIAL_NOT_SET distingue inoltre esplicitamente il caso legacy.
+  Il ticket 14 è riaperto, senza annullare l'implementazione del login.
+
+### Evidenze B-09.1 e B-03.2-13 residuo (20 settembre 2026)
+
+- Proprietari: `web/` (nuovi `playwright.config.ts`, `e2e/fixtures.ts`,
+  `e2e/ui/session.spec.ts`, `e2e/live/session.spec.ts`, `e2e/README.md`,
+  `tsconfig.e2e.json`) e `web/src/pages/IdentityPage.tsx` per il fix
+  emerso dai test browser.
+- Runner Playwright bloccato: `@playwright/test@1.63.0` esatto nel
+  `package-lock.json`; browser Chromium (Headless Shell) installato via
+  `npx playwright install chromium` (v1243). Nuovi script npm: `e2e`,
+  `e2e:live`, `e2e:install`; `typecheck` esteso al `tsconfig.e2e.json`.
+- Due profili distinti: `ui` con backend intercettato dalla fixture
+  `session` (nessun servizio esterno) e `live` opt-in via
+  `NEWRAY_E2E_LIVE=1`, non incluso in CI. Prettier e vitest esclusi
+  reciprocamente dagli scope (`vite.config.ts` include solo `src/**`;
+  `.prettierignore` esclude `playwright-report/`, `test-results/`).
+- Primo corpus di 8 test sessione (verdi in 12,6 s locali su Chromium
+  Headless Shell 153.0.8010.12): non autenticato → form accessibile;
+  bootstrap 201 → attiva; bootstrap 500 → alert `role=alert` focalizzato,
+  nome preservato, retry ripristina; bootstrap 409 → schermata "già
+  inizializzato" con "Rileva la sessione"; doppio click → **un solo**
+  invio (regressione bloccata); revoca 500 → alert senza falsa conferma
+  di logout; rete interrotta → errore recuperabile; navigazione tastiera
+  con Enter conclude il flusso.
+- Fix reale scoperto dai test browser: `handleBootstrap` in
+  `IdentityPage.tsx` non aveva la guardia `if (bootstrap.isPending) return`
+  che esisteva già per `revoke`. Il pulsante disabilitato non basta
+  contro click sintetici o Enter tenuto premuto — la mutation partiva
+  due volte. Aggiunta la guardia in linea con `onRevoke`.
+- CI: nuovo job `e2e` in `.github/workflows/ci.yml` (checkout, setup-node
+  22, `npm ci --ignore-scripts`, cache `~/.cache/ms-playwright`,
+  `npx playwright install --with-deps chromium`, `npm run e2e`; artifact
+  `playwright-report`/`test-results` caricati solo su fallimento). Il
+  profilo `live` resta fuori dalla CI: la sua qualifica arriva con
+  B-09.2/B-09.3 e un modello scelto per B-03.4.
+- Gate locali: `npm run check` verde (Prettier, ESLint, TypeScript strict
+  su entrambi i `tsconfig`, Vitest **16 passed**, licenze **341**
+  pacchetti allowlist, build, budget JS 303,8 KB / CSS 2,3 KB);
+  `npm run e2e` **8 passed**.
+- Limiti: workflow CI non eseguito qui (dichiarativo); il profilo `live`
+  non è ancora coperto — sarà chiuso con B-09.2/B-09.3. La corsa fra la
+  `GET /me` iniziale e la modifica di scenario è mitigata rimuovendo
+  `goto` dal `beforeEach` e attendendo esplicitamente lo stato signed-out
+  prima di procedere; convenzione documentata in `e2e/README.md`.
+
+### Evidenze B-03.2-32, B-03.2-31, B-03.2-15 (22 settembre 2026)
+
+**B-03.2-32 — pwdlib/Argon2id:**
+- `pyproject.toml`: aggiunta dipendenza `pwdlib[argon2]>=0.2`; locked: argon2-cffi 25.1.0, pwdlib 0.3.1.
+- `kernel/crypto.py`: `_hasher = PasswordHash((Argon2Hasher(),))` primario; `hash_credential()` produce Argon2id; `verify_and_check_rehash()` ritorna `(valid, updated_hash_or_none)` — rileva prefix `pbkdf2_sha256` e marca rehash; `_verify_pbkdf2()` conservata per compatibilità; `_DUMMY_HASH` precalcolato.
+- `modules/identity/application.py`: `login()` usa `verify_and_check_rehash()` e chiama `update_credential_hash()` atomicamente quando `updated is not None`.
+- `modules/identity/ports.py`: aggiunta `update_credential_hash(user_id, new_hash)` al protocollo `UserRepository`.
+- `adapters/postgres.py`: implementazione `update_credential_hash` con `_set_owner_lookup_flag` e UPDATE scoped `role='owner'`.
+- `tests/fakes/__init__.py`: fake `update_credential_hash` aggiornato.
+- 8 test unit (`test_crypto.py`): hash Argon2id, verifica PBKDF2 legacy con segnalazione rehash, password errata PBKDF2/Argon2, dummy_verify, hash vuoto, record malformato.
+- 3 test applicazione (`test_identity_application.py`): rehash PBKDF2→Argon2id su login, no rehash se Argon2, anti-enum con dummy_verify.
+- Gate: ruff check ✓, ruff format ✓, mypy 58 files ✓, architecture checker 58 files ✓, 235 test passati.
+
+**B-03.2-31 — anti-enumerazione:**
+- `kernel/crypto.py`: `dummy_verify()` chiama `_hasher.verify("__dummy__", _DUMMY_HASH)` in except silente — lavoro coerente Argon2id.
+- `modules/identity/application.py`: `login()` chiama `dummy_verify()` quando `find_owner_by_display_name` ritorna `None`.
+- Test: `test_login_owner_sconosciuto_esegue_dummy_verify` — verifica che login sconosciuto restituisce 401 INVALID_CREDENTIALS senza sessione creata.
+
+**B-03.2-15 — HTTP/DTO errori:**
+- `interfaces/http/errors.py`: `correlation_id()` valida X-Request-ID (ASCII stampabile `[\x20-\x7E]+`, max 128 char, UUID server se invalido); `RequestValidationError` handler → 422 VALIDATION_ERROR con envelope fisso; 500 `retryable=False`.
+- `interfaces/http/dto/conversations.py`: `_reject_whitespace_only()` helper + `@field_validator` su `title` (Create/Rename) e `content` (CreateMessage).
+- 6 test contratti (`test_http_api.py`): X-Request-ID con control char/troppo lungo ignorato, valido riflesso; whitespace-only→400 INVALID_NAME; Pydantic→422 VALIDATION_ERROR; 401 retryable=False.
+- 2 test conversazioni (`test_http_conversations.py`): titolo/messaggio solo whitespace→422 VALIDATION_ERROR.
+- Codegen rigenerata senza drift: `scripts/generate_openapi.py` e `scripts/generate_ts_client.sh`.
+
+**Test LLM locali (22 settembre 2026):**
+- Ollama su AMD Radeon AI PRO R9700 (31.9 GiB VRAM), isolamento GPU NVIDIA via mount namespace.
+- 2 live test con llama3.1:8b (catalogo + stream), 2 live con newray-swift-qwen3.8-27b:q5-k-m.
+- Smoke test 4/4 modelli passati:
+  - base (newray-qwen3.8-27b:ud-q5-k-m): load 10.7s, 18.4 GiB VRAM
+  - swift (newray-swift-qwen3.8-27b:q5-k-m): load 12.4s, 18.4 GiB VRAM
+  - swift-uncensored (newray-swift-qwen3.8-27b-uncensored:ud-q5-k-m): load 13.2s, 18.1 GiB VRAM
+  - gemma (newray-gemma4-31b-it:ud-q4-k-xl): load 14.6s, 18.7 GiB VRAM
+- Tutti: done_reason=stop, content="OK", eval_count=2, context_length=8192.
+
+### Evidenze del riallineamento chat e backlog (22 settembre 2026)
+
+- Ispezione statica di `routes/chat.py`, `dto/chat.py`, `wiring.py`,
+  `models/adapters/echo.py`, `features/chat/*`, `ConversationsPage.tsx`, fixture
+  e casi Playwright. Nessun test backend contiene una richiesta alla route
+  `/conversations/{conversation_id}/run`; i test citati per ChatModel coprono
+  dominio/adapter/profili/lifecycle, non quel confine HTTP.
+- `npm run check`: verde — Prettier, ESLint, TypeScript, **21 Vitest**, licenze
+  **637** pacchetti, build Vite; bundle **360,6 KB JS / 23,1 KB CSS**.
+- `npm run e2e`, rieseguito isolatamente dopo una prima collisione di avvio
+  del web server dovuta ai gate paralleli: **24/24 verdi in 37,4 s**. I 6 casi
+  chat intercettano HTTP e non provano API/DB/Ollama; il test «stop» non invia
+  l'azione di stop.
+- Backend: Ruff lint e format (**91 file**), mypy (**61 file**), checker
+  architettura (**61 file**) e codegen `--check` verdi. Il report fornito
+  dall'utente registra **235 passed / 49 skipped**; la riesecuzione pytest di
+  questo riesame non ha prodotto output né terminato entro oltre 60 s ed è
+  stata interrotta, quindi non viene presentata come ulteriore prova verde.
+- Il controllo ad hoc `npx prettier --check ../docs/backlog.md` segnala lo
+  stile tabellare storico dell'intero ledger; non è parte di `npm run check`.
+  Non è stato applicato un reformat meccanico di oltre 2.000 righe, per non
+  confondere l'aggiornamento sostanziale con churn documentale non richiesto.
+- Nessun PostgreSQL reale, Ollama live, container, account o dato utente è
+  stato toccato in questo riallineamento. La directory continua a non essere
+  riconosciuta da Git; l'unico file sorgente/documentazione modificato
+  intenzionalmente è il ledger (i gate hanno rigenerato i normali asset `dist`).
+
+### Evidenze B-03.2-34, B-03.2-36 e B-03.2-22 (22 settembre 2026)
+
+- `models` acquisisce e valida `eval_count`/`eval_duration` Ollama; il dominio
+  calcola token/s soltanto da valori presenti e positivi. Il terminale SSE
+  espone conteggio, nanosecondi e throughput nullable. Fixture omesse, nulle,
+  zero, tipi errati e formula sono coperte; contratti OpenAPI/TypeScript
+  rigenerati senza modifica manuale.
+- Il nuovo owner `modules/runs` prepara la preview usando soltanto API pubbliche,
+  principal server-side e binding identificato. Budget: 50 messaggi recenti,
+  100.000 caratteri e 2.048 token output. La route è marcata deprecata e
+  transitoria; `UnavailableChatModel` sostituisce il fallback Echo in
+  produzione. Echo resta fake esplicitamente iniettato nei test.
+- Prompt e output vengono persistiti come coppia atomica dopo un solo terminale
+  reale; errori, EOF e cancel chiudono lo stream e non scrivono. La ricevuta
+  `Idempotency-Key` scoped riproduce l'output senza seconda inference e rifiuta
+  la stessa chiave con payload diverso. Tutto l'I/O DB sincrono è offloadato
+  per blocchi completi. B-04–B-07 restano la sostituzione durevole.
+- Migrazione 0007 applica `ENABLE/FORCE RLS` a organizations e separa lookup
+  della sessione presentata dalle policy di insert/update/delete. Porte,
+  adapter e fake richiedono scope esplicito; la revoca riceve il `Principal` e
+  una sessione altrui resta invariata.
+- PostgreSQL 18.6 reale: **50 integration passed**. Suite backend completa:
+  **323 passed, 2 skipped, 2 warning**; gli skip live sono stati eseguiti a
+  parte. Ruff lint/format, mypy su 65 sorgenti, checker architettura su 65 file
+  e codegen `--check` verdi.
+- Live Ollama 0.34.2: **2 passed** con `llama3.2:3b`, digest
+  `a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72`,
+  AMD Radeon AI PRO R9700/gfx1201 e prompt sintetico. Campione telemetrico:
+  9 token, 498.298.000 ns, 18,06 token/s. È prova di protocollo, non qualifica
+  del modello. Rapporto e fingerprint:
+  [backend-live-2026-09-22.md](evidence/backend-live-2026-09-22.md).
+
+## Decisioni da acquisire quando servono
+
+Modelli e digest prima delle prove live; provider email/calendario prima dei
+relativi test; corpus, utenti e concorrenza prima delle promesse ufficio;
+retention e recupero prima di dati non sintetici; licenza prima della pubblicazione.
+Vedere NewRay.md §25.2 per default e condizioni. Nessun blocco sullo scheletro.

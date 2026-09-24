@@ -1,0 +1,61 @@
+# Composizione minima NewRay su Linux (NewRay.md §21.1, A-07).
+#
+# Servizi: PostgreSQL/pgvector + API. L'API usa host networking: il socket
+# resta sull'interfaccia loopback dell'host (127.0.0.1:8000 per default),
+# come l'avvio nativo documentato — non esiste bind non-loopback in questa
+# composizione. Il DB pubblica la porta solo su loopback dell'host.
+#
+# Nessuna password predefinita: creare deploy/.env da deploy/.env.example
+# con valori casuali (openssl rand -hex 16). .env contiene credenziali e
+# non va mai condiviso.
+name: newray
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: newray
+      # Il superuser dell'immagine è il proprietario delle migrazioni,
+      # coerente con il bootstrap nativo (bootstrap.sql).
+      POSTGRES_USER: newray_migrate
+      POSTGRES_PASSWORD: ${NEWRAY_DB_MIGRATE_PASSWORD:?definire in deploy/.env}
+      # Usato dallo script di prima inizializzazione (deploy/db-init).
+      NEWRAY_DB_APP_PASSWORD: ${NEWRAY_DB_APP_PASSWORD:?definire in deploy/.env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Solo loopback dell'host: l'API (host networking) raggiunge il DB lì.
+      - "127.0.0.1:${NEWRAY_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U newray_migrate -d newray"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: newray-api:local
+    network_mode: host
+    environment:
+      NEWRAY_BIND_ADDRESS: 127.0.0.1
+      NEWRAY_PORT: ${NEWRAY_PORT:-8000}
+      NEWRAY_DATA_DIR: /var/lib/newray
+      # Credenziali distinte: ruolo applicativo per l'app, ruolo
+      # proprietario per le migrazioni dell'entrypoint (§21.2, ADR 0002).
+      NEWRAY_DATABASE_DSN: postgresql+psycopg://newray_app:${NEWRAY_DB_APP_PASSWORD}@127.0.0.1:${NEWRAY_DB_PORT:-5432}/newray
+      NEWRAY_MIGRATION_DATABASE_URL: postgresql+psycopg://newray_migrate:${NEWRAY_DB_MIGRATE_PASSWORD}@127.0.0.1:${NEWRAY_DB_PORT:-5432}/newray
+    volumes:
+      # Dati operativi fuori dai sorgenti (volume nominato, §21.2).
+      - newray-data:/var/lib/newray
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  newray-data:

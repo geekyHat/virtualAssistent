@@ -1,0 +1,23 @@
+# Contesto di build dell'immagine API (A-07): solo ciò che serve.
+# backend/README.md resta nel contesto: hatchling lo legge come readme del
+# progetto durante `uv sync`.
+web/
+contracts/
+docs/
+packs/
+agent-skills/
+scripts/
+tests/
+.github/
+deploy/db-init/
+deploy/compose.yaml
+deploy/.env.example
+README.md
+backend/tests/
+backend/.venv/
+backend/.mypy_cache/
+backend/.ruff_cache/
+.env
+.env.*
+.newray-test-env.sh
+runtime/

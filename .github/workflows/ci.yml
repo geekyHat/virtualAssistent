@@ -1,0 +1,156 @@
+# CI NewRay (NewRay.md §22.4): tutti i gate del repository in job separati.
+#
+# Job:
+# - backend:      ambiente uv locked, ruff, mypy, pytest (offline + integration
+#                 su PostgreSQL reale con ruoli dedicati, come i test locali);
+# - web:          npm ci locked, npm run check (format, lint, typecheck, test,
+#                 licenze, build, budget bundle);
+# - e2e:          Playwright profilo `ui` con rotte mockate (nessun backend);
+#                 il profilo `live` è opt-in e resta fuori dalla CI di default;
+# - contracts:    rigenerazione dei contratti senza drift (generate --check);
+# - architecture: confini degli import e cicli (script di sola standard library).
+#
+# Nota: il workflow è dichiarativo — qui nel repository non viene eseguito;
+# la verifica reale avviene al primo push su un host con GitHub Actions.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Un solo run contemporaneo per ref: il ledger è uno solo, l'ordine dei job
+# non conta (sono indipendenti).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend — uv, ruff, mypy, pytest
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Ambiente uv locked
+        working-directory: backend
+        run: uv sync --locked
+      - name: Ruff (lint e format)
+        working-directory: backend
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: Mypy strict
+        working-directory: backend
+        run: uv run mypy
+      - name: Tooling locale (contratti offline e test negativi)
+        run: |
+          bash -n .start
+          backend/.venv/bin/ruff check --config backend/pyproject.toml scripts/start_local.py scripts/local_models.py scripts/generate_contracts.py scripts/tests
+          backend/.venv/bin/ruff format --check --config backend/pyproject.toml scripts/start_local.py scripts/local_models.py scripts/generate_contracts.py scripts/tests
+          backend/.venv/bin/python -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Ruoli e database di test (bootstrap.sql, password solo dev)
+        run: >-
+          psql "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+          -v ON_ERROR_STOP=1
+          -f backend/scripts/db/bootstrap.sql
+      - name: Pytest (offline + integration PostgreSQL)
+        working-directory: backend
+        env:
+          NEWRAY_TEST_ADMIN_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/postgres
+          NEWRAY_TEST_MIGRATION_URL: postgresql+psycopg://newray_migrate:newray-migrate-dev@127.0.0.1:5432/postgres
+          NEWRAY_TEST_DATABASE_URL: postgresql+psycopg://newray_app:newray-app-dev@127.0.0.1:5432/postgres
+        run: uv run pytest
+
+  web:
+    name: Web — npm run check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Dipendenze locked
+        working-directory: web
+        run: npm ci --ignore-scripts
+      - name: "Check: format, lint, typecheck, test, licenze, build, budget"
+        working-directory: web
+        run: npm run check
+
+  e2e:
+    name: E2E — Playwright profilo ui su trasporto controllato
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Dipendenze locked
+        working-directory: web
+        run: npm ci --ignore-scripts
+      - name: Cache binari Playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+      - name: Installazione Chromium (headless shell)
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: "E2E ui (nessun backend, rotte mockate dalla fixture)"
+        working-directory: web
+        run: npm run e2e
+      - name: Report Playwright (solo su fallimento)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report
+            web/test-results
+          retention-days: 7
+
+  contracts:
+    name: Contratti — rigenerazione senza drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Ambienti locked (uv del backend, npm del web)
+        run: |
+          uv sync --locked --project backend
+          npm ci --ignore-scripts --prefix web
+      - name: Drift (rigenera e confronta byte a byte)
+        run: python scripts/generate_contracts.py --check
+
+  architecture:
+    name: Architettura — confini import e cicli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verifica (solo standard library Python)
+        run: python scripts/check_architecture.py

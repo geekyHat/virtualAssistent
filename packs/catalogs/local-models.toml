@@ -1,0 +1,44 @@
+schema_version = 1
+# Inventario locale richiesto dall'utente. Nessun modello viene scaricato.
+model_root = "/mnt/backup/llm/models"
+minimum_ollama_version = "0.34.0"
+context_length = 8192
+# Solo candidato pilot: l'import degli altri modelli richiede --model o --all.
+default_model = "newray-gemma4-31b-it:ud-q4-k-xl-vision-v1"
+
+[[models]]
+id = "base"
+name = "newray-qwen3.8-27b:ud-q5-k-m"
+file = "Qwen3.8-27B/Qwen3.8-27B-UD-Q5_K_M.gguf"
+architecture = "qwen35"
+license_status = "GGUF dichiara apache-2.0; distribuzione da verificare alla fonte"
+
+[[models]]
+id = "swift"
+name = "newray-swift-qwen3.8-27b:q5-k-m"
+file = "Swift-Qwen3.8-27B/Swift-Qwen3.8-27B-Q5_K_M.gguf"
+architecture = "qwen35"
+license_status = "GGUF dichiara other; licenza esatta da acquisire prima della distribuzione"
+
+[[models]]
+id = "swift-uncensored"
+name = "newray-swift-qwen3.8-27b-uncensored:ud-q5-k-m"
+file = "Swift-Qwen3.8-27B-Uncensored/Swift-Qwen3.8-27B-Uncensored-Dynamic-MTP-UD-Q5_K_M.gguf"
+architecture = "qwen35"
+license_status = "Licenza non presente nei metadata letti; da acquisire prima della distribuzione"
+
+[[models]]
+id = "gemma"
+name = "newray-gemma4-31b-it:ud-q4-k-xl-vision-v1"
+file = "Gemma-4-31B-it/gemma-4-31B-it-UD-Q4_K_XL.gguf"
+sha256 = "9e92cb6236044c6a9870af406029c74a76e0571c157a6f95df724dcc8c7a1575"
+architecture = "gemma4"
+source_repository = "https://huggingface.co/unsloth/gemma-4-31B-it-GGUF"
+source_revision = "c1ac76e99d5513b141e8adde7288b85c3f9c32ec"
+license_status = "Google e repo Unsloth dichiarano Apache-2.0; notice e bundle da verificare prima della distribuzione"
+vision_projector_file = "Gemma-4-31B-it/mmproj-F16.gguf"
+vision_projector_sha256 = "6edcca228213c28d3567a35d22f849eea52d8360875093851959adf5d2f270eb"
+draft_model_file = "Gemma-4-31B-it/mtp-gemma-4-31B-it.gguf"
+draft_model_sha256 = "5ae8b0117bed601e8924c6305bd5b0585de361d51f0e77091bcb4252cf1f27de"
+# Il proiettore viene associato come secondo FROM; MTP resta inventariato ma
+# non usato. Il precedente tag testuale senza proiettore non viene sovrascritto.

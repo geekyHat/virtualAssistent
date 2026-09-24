@@ -1,0 +1,83 @@
+/*
+ * Stile globale NewRay — Tailwind v4 CSS-first (ADR 0005).
+ *
+ * I token visivi preesistenti (tokens.css) sono mappati sulle variabili
+ * shadcn senza redesign: stessi colori, stesso raggio, stessa font.
+ * Tema chiaro solo: il design attuale non prevede dark mode e non la
+ * introduciamo implicitamente.
+ */
+@import "tailwindcss";
+@import "tw-animate-css";
+
+:root {
+  /* Palette esistente (tokens.css) → variabili shadcn. */
+  --background: #f7f8f6;
+  --foreground: #20261f;
+  --card: #ffffff;
+  --card-foreground: #20261f;
+  --popover: #ffffff;
+  --popover-foreground: #20261f;
+  --primary: #2f6b4f;
+  --primary-foreground: #ffffff;
+  --secondary: #eef1ed;
+  --secondary-foreground: #20261f;
+  --muted: #eef1ed;
+  --muted-foreground: #5c655d;
+  --accent: #2f6b4f;
+  --accent-hover: #275a42;
+  --accent-foreground: #ffffff;
+  --destructive: #9c3b2e;
+  --destructive-foreground: #ffffff;
+  --border: #dde2dc;
+  --input: #dde2dc;
+  --ring: #2f6b4f;
+  --radius: 0.5rem;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--font-sans);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}

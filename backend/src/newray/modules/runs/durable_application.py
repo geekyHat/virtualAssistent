@@ -1,0 +1,116 @@
+"""Prima slice P-05: creazione idempotente e lettura di snapshot durevoli.
+
+La coda non è ancora consumata dal worker: finché claim, fencing e
+riconciliazione non sono qualificati, questa slice resta interna e non
+pubblica una route che prometterebbe esecuzione.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import uuid
+from collections.abc import Mapping
+from datetime import UTC, datetime
+
+from newray.kernel.errors import Conflict, NotFound
+from newray.kernel.identity import Principal, new_id
+
+from .application import InlineRunService
+from .durable import DurableRun, RunState, RunStore
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_json_value(item) for item in value]
+    return value
+
+
+def _payload_hash(profile_id: uuid.UUID, content: str) -> str:
+    payload = json.dumps(
+        {"profile_id": str(profile_id), "content": content},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class DurableRunService:
+    """Run accodati; nessun avvio automatico fino al worker P-05."""
+
+    def __init__(self, store: RunStore, inline: InlineRunService) -> None:
+        self._store = store
+        self._inline = inline
+
+    async def create(
+        self,
+        principal: Principal,
+        conversation_id: uuid.UUID,
+        profile_id: uuid.UUID,
+        content: str,
+        idempotency_key: str,
+    ) -> DurableRun:
+        if not 1 <= len(idempotency_key) <= 96:
+            raise ValueError("chiave di idempotenza fuori dai limiti")
+        payload_hash = _payload_hash(profile_id, content)
+        existing = await asyncio.to_thread(
+            self._store.find_by_key, principal.scope, conversation_id, idempotency_key
+        )
+        if existing is not None:
+            if existing.payload_hash != payload_hash:
+                raise Conflict("chiave di idempotenza riutilizzata con richiesta diversa")
+            return existing
+
+        prepared = await self._inline.prepare(principal, conversation_id, profile_id, content)
+        binding = prepared.binding
+        snapshot: dict[str, object] = {
+            "profile_id": str(binding.profile_id),
+            "profile_version_id": str(binding.profile_version_id),
+            "binding_id": str(binding.binding_id),
+            "model_name": binding.model_name,
+            "runtime": binding.runtime,
+            "digest": binding.digest,
+            "parameters": _json_value(binding.parameters),
+            "instructions": binding.instructions,
+            "messages": [
+                {"role": str(message.role), "content": message.content}
+                for message in prepared.chat_request.messages
+            ],
+            "prompt": content,
+            "max_output_tokens": prepared.chat_request.max_tokens,
+            "context_truncated": prepared.context_truncated,
+            "context_message_count": prepared.context_message_count,
+            "context_character_count": prepared.context_character_count,
+        }
+        now = datetime.now(UTC)
+        run = DurableRun(
+            id=new_id(),
+            conversation_id=conversation_id,
+            organization_id=principal.organization_id,
+            owner_id=principal.user_id,
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            state=RunState.QUEUED,
+            snapshot=snapshot,
+            partial_text="",
+            finish_reason=None,
+            prompt_tokens=None,
+            completion_tokens=None,
+            eval_duration_ns=None,
+            lease_owner=None,
+            lease_until=None,
+            fence=0,
+            created_at=now,
+            updated_at=now,
+        )
+        return await asyncio.to_thread(self._store.enqueue, run)
+
+    async def get(self, principal: Principal, run_id: uuid.UUID) -> DurableRun:
+        run = await asyncio.to_thread(self._store.get, principal.scope, run_id)
+        if run is None:
+            raise NotFound("run non trovato")
+        return run
