@@ -28,17 +28,23 @@ from newray.modules.models import (
     ChatRole,
     Completion,
     ContentDelta,
+    ToolCallRequest,
 )
 
 from .durable import (
+    EVENT_TOOL_EXECUTING,
+    EVENT_TOOL_FAILED,
+    EVENT_TOOL_SUCCEEDED,
     FINISH_REASON_CANCELLED_BY_USER,
     FINISH_REASON_DEADLINE_EXCEEDED,
     FINISH_REASON_EMPTY_OUTPUT,
     FINISH_REASON_MODEL_ERROR,
+    FINISH_REASON_TOOL_BUDGET_EXCEEDED,
     DurableRun,
     RunState,
     RunStore,
 )
+from .tool_gateway import ToolGateway, ToolInvocationState
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,10 @@ DEFAULT_MAX_DURATION_SECONDS = 300
 #: Grace oltre la quale un worker senza heartbeat proprio è considerato
 #: verificato morto (non il solo lease del run scaduto, NewRay.md §8.4).
 DEFAULT_RECLAIM_GRACE_SECONDS = 45
+#: Limite di turni tool per run (NewRay.md §8.1 passo 7): oltre questo la
+#: generazione si ferma con ``tool_budget_exceeded``, mai un ciclo infinito.
+#: Valore iniziale dichiarato, da tarare in P-19/P-20.
+DEFAULT_MAX_TOOL_CALLS = 8
 
 
 def _chat_request_from_snapshot(snapshot: Mapping[str, object]) -> ChatRequest:
@@ -99,6 +109,7 @@ class RunWorker:
         conversations: ConversationService,
         chat_model: ChatModel,
         *,
+        tool_gateway: ToolGateway | None = None,
         worker_id: uuid.UUID | None = None,
         resource_id: str = DEFAULT_RESOURCE_ID,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
@@ -106,10 +117,15 @@ class RunWorker:
         max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS,
         reclaim_grace_seconds: int = DEFAULT_RECLAIM_GRACE_SECONDS,
         heartbeat_interval_seconds: float | None = None,
+        max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
     ) -> None:
         self._store = store
         self._conversations = conversations
         self._chat_model = chat_model
+        #: Gateway tool opzionale (P-07): assente → nessun tool offerto, il
+        #: ciclo resta quello di P-05/P-06 (una sola generazione).
+        self._tool_gateway = tool_gateway
+        self._max_tool_calls = max_tool_calls
         self.worker_id = worker_id or new_id()
         self.resource_id = resource_id
         self._lease_seconds = lease_seconds
@@ -176,7 +192,12 @@ class RunWorker:
                 return
 
     async def _execute(self, run: DurableRun) -> None:
-        request = _chat_request_from_snapshot(run.snapshot)
+        base_request = _chat_request_from_snapshot(run.snapshot)
+        messages: list[ChatMessage] = list(base_request.messages)
+        principal = _principal_for_run(run)
+        tool_schemas = (
+            self._tool_gateway.tool_schemas(principal) if self._tool_gateway is not None else ()
+        )
         progress = _Progress()
         fence = run.fence
         stop_heartbeat = asyncio.Event()
@@ -189,27 +210,71 @@ class RunWorker:
         completion: Completion | None = None
         deadline_hit = False
         model_error = False
-        stream = self._chat_model.stream(request)
+        tool_budget_exceeded = False
+        tool_turns = 0
         try:
-            async for event in stream:
-                if progress.lost_fence or progress.cancel_requested:
+            # Ciclo tool (NewRay.md §8.1 passo 7): il worker guida la
+            # continuazione sullo stesso modello. Un turno produce testo e/o
+            # richieste tool; le richieste passano dal gateway (autorità
+            # server-side) e i risultati rientrano nel contesto come
+            # messaggi TOOL. Il ciclo termina su completamento senza tool,
+            # budget turni superato, deadline, cancel, fencing perso o errore.
+            while True:
+                request = ChatRequest(
+                    model=base_request.model,
+                    runtime=base_request.runtime,
+                    messages=tuple(messages),
+                    parameters=base_request.parameters,
+                    max_tokens=base_request.max_tokens,
+                    tools=tool_schemas,
+                )
+                pending_calls: list[ToolCallRequest] = []
+                turn_completion: Completion | None = None
+                stream = self._chat_model.stream(request)
+                try:
+                    async for event in stream:
+                        if progress.lost_fence or progress.cancel_requested:
+                            break
+                        if isinstance(event, ContentDelta):
+                            progress.text += event.text
+                        elif isinstance(event, ToolCallRequest):
+                            pending_calls.append(event)
+                        elif isinstance(event, Completion):
+                            turn_completion = event
+                            break
+                        if loop.time() >= deadline_at:
+                            deadline_hit = True
+                            break
+                except Exception:
+                    logger.exception("run %s: errore di generazione", run.id)
+                    model_error = True
+                finally:
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        with contextlib.suppress(Exception):
+                            await close()
+
+                if progress.lost_fence or progress.cancel_requested or deadline_hit or model_error:
                     break
-                if isinstance(event, ContentDelta):
-                    progress.text += event.text
-                elif isinstance(event, Completion):
-                    completion = event
+                if not pending_calls:
+                    completion = turn_completion
+                    break
+
+                tool_turns += 1
+                if tool_turns > self._max_tool_calls:
+                    tool_budget_exceeded = True
+                    break
+                for call in pending_calls:
+                    if not await self._run_tool(run, fence, principal, call, progress, messages):
+                        break
+                if progress.lost_fence:
+                    break
+                if progress.cancel_requested:
                     break
                 if loop.time() >= deadline_at:
                     deadline_hit = True
                     break
-        except Exception:
-            logger.exception("run %s: errore di generazione", run.id)
-            model_error = True
         finally:
-            close = getattr(stream, "aclose", None)
-            if close is not None:
-                with contextlib.suppress(Exception):
-                    await close()
             stop_heartbeat.set()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat_task
@@ -217,6 +282,19 @@ class RunWorker:
         if progress.lost_fence:
             # Un worker più recente possiede già il run: nessuna scrittura,
             # né di stato né di messaggi (fencing).
+            return
+
+        if tool_budget_exceeded:
+            await self._finalize_only(
+                run,
+                fence,
+                RunState.FAILED,
+                FINISH_REASON_TOOL_BUDGET_EXCEEDED,
+                None,
+                None,
+                None,
+                progress.text,
+            )
             return
 
         if progress.cancel_requested:
@@ -298,6 +376,68 @@ class RunWorker:
             idempotency_key=finalized.idempotency_key,
             request_hash=finalized.payload_hash,
         )
+
+    async def _run_tool(
+        self,
+        run: DurableRun,
+        fence: int,
+        principal: Principal,
+        call: ToolCallRequest,
+        progress: _Progress,
+        messages: list[ChatMessage],
+    ) -> bool:
+        """Esegue una chiamata tool: ricevuta ``executing`` fencing-checked
+        PRIMA di eseguire, poi esito ``succeeded``/``failed``, infine il
+        risultato rientra nel contesto come messaggio TOOL. La ricevuta prima
+        dell'esecuzione dà una traccia anche se il worker perde il fence
+        durante l'esecuzione. Ritorna ``False`` (e segnala ``lost_fence``) se
+        un worker più recente possiede già il run."""
+        assert self._tool_gateway is not None
+        invocation_id = new_id()
+        arguments = dict(call.arguments)
+        updated = await asyncio.to_thread(
+            self._store.record_tool_event,
+            run.id,
+            self.worker_id,
+            fence,
+            invocation_id,
+            call.call_id,
+            call.name,
+            arguments,
+            ToolInvocationState.EXECUTING,
+            EVENT_TOOL_EXECUTING,
+            None,
+            None,
+        )
+        if updated is None:
+            progress.lost_fence = True
+            return False
+
+        result = await asyncio.to_thread(self._tool_gateway.invoke, principal, call)
+        state = ToolInvocationState.FAILED if result.is_error else ToolInvocationState.SUCCEEDED
+        event_type = EVENT_TOOL_FAILED if result.is_error else EVENT_TOOL_SUCCEEDED
+        updated = await asyncio.to_thread(
+            self._store.record_tool_event,
+            run.id,
+            self.worker_id,
+            fence,
+            invocation_id,
+            call.call_id,
+            call.name,
+            arguments,
+            state,
+            event_type,
+            result.content,
+            result.error_code,
+        )
+        if updated is None:
+            progress.lost_fence = True
+            return False
+
+        messages.append(
+            ChatMessage(role=ChatRole.TOOL, content=result.content, tool_call_id=call.call_id)
+        )
+        return True
 
     async def _finalize_only(
         self,

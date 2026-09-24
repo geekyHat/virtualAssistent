@@ -227,6 +227,62 @@ describe("runEventsReducer", () => {
     expect(state.status).toBe("cancelled");
   });
 
+  it("tool.executing mostra il tool attivo; tool.succeeded lo libera, il run continua", () => {
+    const state = run([
+      { kind: "start" },
+      { kind: "event", type: "run.started", sequence: 1, payload: {} },
+      {
+        kind: "event",
+        type: "tool.executing",
+        sequence: 2,
+        payload: { tool_name: "run.status", is_error: false },
+      },
+    ]);
+    expect(state.activeTool).toBe("run.status");
+    expect(state.status).toBe("streaming");
+
+    const after = runEventsReducer(state, {
+      kind: "event",
+      type: "tool.succeeded",
+      sequence: 3,
+      payload: { tool_name: "run.status", is_error: false },
+    });
+    expect(after.activeTool).toBeNull();
+    expect(after.status).toBe("streaming");
+  });
+
+  it("tool.failed non è un guasto del run: libera il tool, la generazione prosegue", () => {
+    const state = run([
+      { kind: "start" },
+      { kind: "event", type: "run.started", sequence: 1, payload: {} },
+      { kind: "event", type: "tool.executing", sequence: 2, payload: { tool_name: "run.status" } },
+      { kind: "event", type: "tool.failed", sequence: 3, payload: { tool_name: "run.status" } },
+      {
+        kind: "event",
+        type: "run.completed",
+        sequence: 4,
+        payload: { finish_reason: "stop", text: "fatto" },
+      },
+    ]);
+    expect(state.status).toBe("completed");
+    expect(state.text).toBe("fatto");
+    expect(state.activeTool).toBeNull();
+  });
+
+  it("il terminale azzera il tool attivo", () => {
+    const state = run([
+      { kind: "start" },
+      { kind: "event", type: "tool.executing", sequence: 1, payload: { tool_name: "run.status" } },
+      {
+        kind: "event",
+        type: "run.completed",
+        sequence: 2,
+        payload: { finish_reason: "stop", text: "ok" },
+      },
+    ]);
+    expect(state.activeTool).toBeNull();
+  });
+
   it("reset → stato iniziale", () => {
     const state = run([
       { kind: "start" },

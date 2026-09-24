@@ -18,7 +18,7 @@ from newray.kernel.errors import Conflict, NotFound, QueueFull
 from newray.kernel.identity import Principal, new_id
 
 from .application import InlineRunService
-from .durable import DurableRun, EventPage, RunState, RunStore
+from .durable import DurableRun, EventPage, RunState, RunStore, ToolInvocation
 
 #: Limite di coda per scope (organizzazione/proprietario), non globale: il
 #: pilot è a singolo proprietario per installazione (ADR 0002). Valore
@@ -159,3 +159,11 @@ class DurableRunService:
         return await asyncio.to_thread(
             self._store.list_events, principal.scope, run_id, after_sequence
         )
+
+    async def tool_invocations(
+        self, principal: Principal, run_id: uuid.UUID
+    ) -> tuple[ToolInvocation, ...]:
+        """Ricevute tool del run, scoped (P-07). Verifica prima l'esistenza/
+        scope del run (404 uniforme se fuori scope), poi elenca."""
+        await self.get(principal, run_id)
+        return await asyncio.to_thread(self._store.list_tool_invocations, principal.scope, run_id)

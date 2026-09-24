@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import text
@@ -12,7 +13,8 @@ from sqlalchemy.engine import Connection, Engine, Row
 from newray.kernel.errors import Conflict, NotFound
 from newray.kernel.identity import Scope
 
-from ..durable import DurableRun, EventPage, RunEvent, RunState, thaw_json
+from ..durable import DurableRun, EventPage, RunEvent, RunState, ToolInvocation, thaw_json
+from ..tool_gateway import ToolInvocationState
 
 
 def _scope(conn: Connection, scope: Scope) -> None:
@@ -66,6 +68,25 @@ _COLUMNS = (
 )
 
 _EVENT_COLUMNS = "id, run_id, sequence, type, payload, occurred_at"
+
+_TOOL_COLUMNS = (
+    "id, run_id, call_id, tool_name, arguments, state, result, error_code, created_at, updated_at"
+)
+
+
+def _tool_invocation(row: Row[Any]) -> ToolInvocation:
+    return ToolInvocation(
+        id=row.id,
+        run_id=row.run_id,
+        call_id=row.call_id,
+        tool_name=row.tool_name,
+        arguments=dict(row.arguments),
+        state=ToolInvocationState(row.state),
+        result=row.result,
+        error_code=row.error_code,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 class PostgresRunStore:
@@ -183,6 +204,55 @@ class PostgresRunStore:
                 text("SELECT count(*) FROM runs WHERE state IN ('queued', 'running')")
             ).scalar_one()
             return int(count)
+
+    def record_tool_event(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        invocation_id: uuid.UUID,
+        call_id: str,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        state: ToolInvocationState,
+        event_type: str,
+        result: str | None,
+        error_code: str | None,
+    ) -> DurableRun | None:
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT " + _COLUMNS + " FROM newray_record_tool_event("
+                    ":run_id, :worker, :fence, :invocation_id, :call_id, :tool_name, "
+                    "CAST(:arguments AS jsonb), :state, :event_type, :result, :error_code)"
+                ),
+                {
+                    "run_id": run_id,
+                    "worker": worker_id,
+                    "fence": fence,
+                    "invocation_id": invocation_id,
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "arguments": json.dumps(thaw_json(arguments), ensure_ascii=False),
+                    "state": str(state),
+                    "event_type": event_type,
+                    "result": result,
+                    "error_code": error_code,
+                },
+            ).first()
+            return None if row is None or row.id is None else _run(row)
+
+    def list_tool_invocations(self, scope: Scope, run_id: uuid.UUID) -> tuple[ToolInvocation, ...]:
+        with self._engine.connect() as conn:
+            _scope(conn, scope)
+            rows = conn.execute(
+                text(
+                    "SELECT " + _TOOL_COLUMNS + " FROM tool_invocations "
+                    "WHERE run_id = :run_id ORDER BY created_at, call_id"
+                ),
+                {"run_id": run_id},
+            ).all()
+            return tuple(_tool_invocation(row) for row in rows)
 
     def claim(
         self, worker_id: uuid.UUID, lease_seconds: int, resource_id: str

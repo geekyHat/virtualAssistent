@@ -662,7 +662,8 @@ dall'e2e. File principali:
 
 ### P-07 — Gateway e ciclo tool sullo stesso Gemma
 
-- **Stato / priorità:** Da fare / P0.
+- **Stato / priorità:** Slice ciclo tool completata (24/09/2026), approval
+  gated / P0.
 - **Proprietario:** tools/gateway, access; porte runs/models.
 - **Dipendenze:** P-05.
 - **Contratto e risultato:** tool call/result strutturati, schema validato,
@@ -683,6 +684,93 @@ dall'e2e. File principali:
   Gemma in P-20, non dedotto dal fake.
 - **Limiti / recupero:** nessuna shell generica, nessun MCP server arbitrario
   installato. I futuri adapter si aggiungono a questa autorità, non la bypassano.
+
+**Slice ciclo tool (24/09/2026).** Confine deciso con l'utente
+(approval gated): il ciclo tool, il registry/allowlist, la validazione
+schema, il lifecycle `tool_invocation`, i limiti, la continuazione, gli
+eventi e il primo tool di sola lettura sono in questa slice; l'approval
+flow resta residuo esplicito (sotto). Motivo: il primo tool concreto
+(`run.status`) è di sola lettura e non richiede approvazione, e nessun tool
+con effetti esterni esiste prima di P-11/P-15 — costruire ora la macchina
+di approvazione sarebbe un modulo per un consumer inesistente (AGENTS.md,
+"nessun modulo vuoto per funzionalità speculative").
+
+Nuovo modulo `tools` (ADR 0008): `RegistryToolGateway` è l'autorità
+server-side — allowlist per ID stabile, validazione degli argomenti (dato
+non fidato del modello) contro lo schema, intersezione capacità/grant. La
+porta `ToolGateway` e il tipo `ToolResult` vivono in `runs` (il
+consumatore); il gateway concreto in `tools` importa `runs.public`, `runs`
+non importa `tools` — inversione di dipendenza, nessun ciclo di modulo
+(architettura verde, 82 file). Il modello emette una `ToolCallRequest` nello
+stream; il worker la esegue tramite il gateway, reimmette il risultato come
+messaggio `TOOL` e continua con lo **stesso** modello/snapshot (ADR 0003,
+nessun router). Limiti: turni tool per run
+(`tool_budget_exceeded`), deadline e cancellazione propagate al ciclo,
+fencing invariato. Primo tool: `run.status`, locale e di sola lettura —
+dimostra la proprietà di sicurezza del ticket: il modello fornisce
+`run_id`, ma lo scope è quello del principal (iniettato dal gateway), mai
+derivato dall'argomento; un `run_id` altrui risolve a "non trovato" sotto
+RLS.
+
+Migrazione `0012_tool_invocations`: tabella `tool_invocations` (RLS FORCE,
+ricevuta idempotente per `(run_id, call_id)`, stati §8.3 nel CHECK), CHECK
+di `run_events.type` esteso con `tool.executing`/`tool.succeeded`/
+`tool.failed`, funzione `SECURITY DEFINER` `newray_record_tool_event`
+(proprietà `newray_scheduler`, ADR 0007) che fa upsert della ricevuta e
+append dell'evento nello stesso commit fencing-checked del run `running`
+(come heartbeat/finalize di 0011): la ricevuta `executing` precede
+l'esecuzione, così una perdita di fence lascia traccia. Nuova route
+`GET /api/v1/runs/{id}/tools` (elenco ricevute, 404 fuori scope). Frontend:
+`runEventsReducer` gestisce i `tool.*` come attività non terminale
+(`activeTool` per l'indicatore live; un `tool.failed` non è un guasto del
+run), con indicatore nella `ConversationsPage`; `chat-sse.spec.ts` resta
+skip da P-06.
+
+Prove reali (PostgreSQL 16 + pgvector 0.6.0 nativi, ruoli
+`newray_migrate`/`newray_app`/`newray_scheduler`; nessun Ollama/GPU: ciclo
+tool provato con `ChatModel` fake). `pytest tests/unit tests/contracts
+tests/integration` da `backend/`: **433 passed**, 2 warning di terze parti.
+Nuovi: `test_tool_gateway.py` (6 unit: allowlist rifiuta tool sconosciuto,
+schema non valido non esegue, scope del principal non dell'argomento con due
+principal, run_id malformato); `test_run_worker.py` esteso (3: ciclo tool
+esegue/registra/continua sullo stesso modello, tool result d'errore
+registra `failed` ma il run continua, limite turni →
+`tool_budget_exceeded`); `test_tool_invocations_integration.py` (3,
+PostgreSQL reale: ricevuta idempotente + eventi tool in ordine con sequenze
+monotone, fencing — vecchio worker non registra, isolamento RLS della
+ricevuta); `test_http_run_events.py` esteso (4: lista tool, 404, lista vuota,
+eventi `tool.*` nello stream con payload per la UI). `ruff`/`ruff format
+--check`/`mypy` (82 sorgenti)/`check_architecture.py` (82 file)/
+`generate_contracts.py --check`: verdi. `web`: `npm run check`
+(format/lint/typecheck/**88 Vitest**/licenze/build/bundle 466,2 KB JS):
+verde; `runEventsReducer.test.ts` esteso con i `tool.*` (20 test).
+`npx playwright test --project=ui`: **57 passed, 7 skipped** (64 totali;
+stesso limite Playwright di P-05/P-06 — eseguibile puntato via modifica
+locale non commessa a `playwright.config.ts`, verificata e ripristinata),
+inclusi 2 nuovi scenari tool (gli eventi `tool.*` non rompono il run;
+`tool.failed` non è un guasto). `NEWRAY_LIVE_START_TEST=1
+scripts/tests/test_start_local.py`: **8/8**, incluse le migrazioni fino alla
+0012 e il worker con il gateway tool collegato.
+
+**Residuo esplicito assegnato (P-07 → con P-11/P-15).** Approval flow:
+stato `awaiting_approval`, rilascio/riacquisizione del compute lease in
+attesa (§8.4), approvazione vincolata a payload/versione/scadenza e
+consumata atomicamente, revoca fra approvazione ed effetto, endpoint HTTP di
+approvazione, UI di conferma. Con esso: il layer dei grant per tool con
+capacità/effetti, la riconciliazione degli esiti incerti
+(`outcome_unknown`) per tool con effetti esterni. Nessuno di questi ha un
+consumer reale finché non esiste un tool con effetti (P-11 documentale,
+P-15 email/calendario): gli stati `prepared`/`awaiting_approval`/
+`outcome_unknown` restano nel CHECK dello schema per stabilità, non scritti.
+`run.waiting_approval` di §19.3 non è emesso. **Live tool use Gemma:** P-20
+(l'adapter Ollama non emette ancora `ToolCallRequest`; il toolset è
+comunque offerto nella richiesta). File principali:
+`backend/migrations/versions/0012_tool_invocations.py`,
+`backend/src/newray/modules/tools/` (dominio/porte/gateway/`run.status`),
+`backend/src/newray/modules/runs/{tool_gateway.py,worker.py,durable.py,adapters/postgres.py}`,
+`backend/src/newray/interfaces/http/{routes/runs.py,dto/runs.py}`,
+`web/src/features/chat/runEventsReducer.ts`,
+[ADR 0008](adr/0008-tool-gateway-authority.md).
 
 ### P-08 — Allegati e archivio file con confine di sicurezza reale
 

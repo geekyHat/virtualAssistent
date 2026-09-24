@@ -35,7 +35,7 @@ from newray.modules.identity import IdentityService
 from newray.modules.models import RUNTIME_OLLAMA, ModelInfo, ModelStatus
 from newray.modules.models.adapters.echo import EchoChatModel
 from newray.modules.profiles import ProfileService
-from newray.modules.runs import RunState
+from newray.modules.runs import RunState, ToolInvocationState
 
 MODEL = ModelInfo(
     name="llama3.1",
@@ -391,3 +391,111 @@ def test_active_run_conversazione_fuori_scope_risponde_null_non_404(
     response = client.get("/api/v1/conversations/00000000-0000-0000-0000-000000000000/active-run")
     assert response.status_code == 200
     assert response.json() is None
+
+
+def _record_tool(store, run_id, worker_id, fence):
+    """Registra una invocazione tool completa (executing → succeeded)."""
+    invocation_id = uuid.uuid4()
+    store.record_tool_event(
+        run_id,
+        worker_id,
+        fence,
+        invocation_id,
+        "call-1",
+        "run.status",
+        {"run_id": str(run_id)},
+        ToolInvocationState.EXECUTING,
+        "tool.executing",
+        None,
+        None,
+    )
+    store.record_tool_event(
+        run_id,
+        worker_id,
+        fence,
+        invocation_id,
+        "call-1",
+        "run.status",
+        {"run_id": str(run_id)},
+        ToolInvocationState.SUCCEEDED,
+        "tool.succeeded",
+        '{"found": true}',
+        None,
+    )
+
+
+def test_lista_tool_di_un_run(service: IdentityService, conversations: ConversationService) -> None:
+    store = InMemoryRunStore()
+    client = _client(service, conversations, store)
+    _bootstrap(client)
+    conversation_id = _create_conversation(client)
+    profile_id = _default_profile_id(client)
+    run_id = _create_run(client, conversation_id, profile_id, "run-1")
+
+    worker_id = uuid.uuid4()
+    claimed = store.claim(worker_id, 30, RESOURCE)
+    assert claimed is not None
+    _record_tool(store, claimed.id, worker_id, claimed.fence)
+
+    response = client.get(f"/api/v1/runs/{run_id}/tools")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["tool_name"] == "run.status"
+    assert items[0]["state"] == "succeeded"
+    assert items[0]["result"] == '{"found": true}'
+    assert items[0]["error_code"] is None
+
+
+def test_lista_tool_run_inesistente_404(
+    service: IdentityService, conversations: ConversationService
+) -> None:
+    client = _client(service, conversations, InMemoryRunStore())
+    _bootstrap(client)
+    response = client.get("/api/v1/runs/00000000-0000-0000-0000-000000000000/tools")
+    assert response.status_code == 404
+
+
+def test_lista_tool_vuota_se_nessun_tool(
+    service: IdentityService, conversations: ConversationService
+) -> None:
+    store = InMemoryRunStore()
+    client = _client(service, conversations, store)
+    _bootstrap(client)
+    conversation_id = _create_conversation(client)
+    profile_id = _default_profile_id(client)
+    run_id = _create_run(client, conversation_id, profile_id, "run-1")
+
+    response = client.get(f"/api/v1/runs/{run_id}/tools")
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+
+
+def test_eventi_tool_nello_stream(
+    service: IdentityService, conversations: ConversationService
+) -> None:
+    store = InMemoryRunStore()
+    client = _client(service, conversations, store)
+    _bootstrap(client)
+    conversation_id = _create_conversation(client)
+    profile_id = _default_profile_id(client)
+    run_id = _create_run(client, conversation_id, profile_id, "run-1")
+
+    worker_id = uuid.uuid4()
+    claimed = store.claim(worker_id, 30, RESOURCE)
+    assert claimed is not None
+    _record_tool(store, claimed.id, worker_id, claimed.fence)
+    store.finalize(
+        claimed.id, worker_id, claimed.fence, RunState.COMPLETED, "stop", 1, 1, 1, "ok", RESOURCE
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/events")
+    frames = _parse_sse(response.text)
+    types = [f[0] for f in frames]
+    assert "tool.executing" in types
+    assert "tool.succeeded" in types
+    # I payload tool portano call_id/tool_name/is_error per la UI.
+    executing = next(f for f in frames if f[0] == "tool.executing")
+    payload = json.loads(executing[2])
+    assert payload["tool_name"] == "run.status"
+    assert payload["is_error"] is False

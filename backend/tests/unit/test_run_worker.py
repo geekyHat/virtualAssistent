@@ -19,6 +19,7 @@ from fakes import (
     InMemoryRunStore,
 )
 from newray.kernel.identity import Principal, Role
+from newray.kernel.identity import Principal as _Principal
 from newray.modules.conversations import ConversationService
 from newray.modules.models import (
     RUNTIME_OLLAMA,
@@ -26,15 +27,20 @@ from newray.modules.models import (
     Completion,
     ContentDelta,
     StreamEvent,
+    ToolCallRequest,
+    ToolSchema,
 )
 from newray.modules.runs import (
     FINISH_REASON_CANCELLED_BY_USER,
     FINISH_REASON_DEADLINE_EXCEEDED,
     FINISH_REASON_EMPTY_OUTPUT,
     FINISH_REASON_MODEL_ERROR,
+    FINISH_REASON_TOOL_BUDGET_EXCEEDED,
     DurableRun,
     RunState,
     RunWorker,
+    ToolInvocationState,
+    ToolResult,
 )
 
 
@@ -127,6 +133,200 @@ class _FencingLossStore(InMemoryRunStore):
     def heartbeat(self, *args: object, **kwargs: object) -> DurableRun | None:
         self.heartbeat_calls += 1
         return None
+
+
+_RUN_STATUS_SCHEMA = ToolSchema(
+    name="run.status",
+    description="stato del run",
+    parameters={
+        "type": "object",
+        "properties": {"run_id": {"type": "string"}},
+        "required": ["run_id"],
+    },
+)
+
+
+class _FakeGateway:
+    """Gateway tool di test: offre ``run.status`` e ritorna un esito fisso."""
+
+    def __init__(self, result: ToolResult | None = None) -> None:
+        self._result = result or ToolResult(content='{"state": "running"}')
+        self.calls: list[ToolCallRequest] = []
+
+    def tool_schemas(self, principal: _Principal) -> tuple[ToolSchema, ...]:
+        return (_RUN_STATUS_SCHEMA,)
+
+    def invoke(self, principal: _Principal, call: ToolCallRequest) -> ToolResult:
+        self.calls.append(call)
+        return self._result
+
+
+class _ToolThenAnswerChatModel:
+    """Primo turno: una richiesta tool. Turni successivi: risposta finale."""
+
+    def __init__(self) -> None:
+        self.turns = 0
+        self.seen_tool_message = False
+
+    def stream(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
+        self.turns += 1
+        turn = self.turns
+        # Il turno di continuazione deve vedere il messaggio TOOL nel contesto.
+        if any(m.role.value == "tool" for m in request.messages):
+            self.seen_tool_message = True
+
+        async def generate() -> AsyncIterator[StreamEvent]:
+            if turn == 1:
+                yield ToolCallRequest(
+                    call_id="c1",
+                    name="run.status",
+                    arguments={"run_id": "00000000-0000-0000-0000-000000000001"},
+                )
+                yield Completion(finish_reason="tool_calls", prompt_tokens=3, completion_tokens=1)
+            else:
+                yield ContentDelta(text="Il run è in corso.")
+                yield Completion(
+                    finish_reason="stop",
+                    prompt_tokens=6,
+                    completion_tokens=4,
+                    eval_duration_ns=1_000_000,
+                )
+
+        return generate()
+
+
+class _AlwaysToolChatModel:
+    """Chiede un tool a ogni turno: prova il limite di turni tool."""
+
+    def __init__(self) -> None:
+        self.turns = 0
+
+    def stream(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
+        self.turns += 1
+        n = self.turns
+
+        async def generate() -> AsyncIterator[StreamEvent]:
+            yield ToolCallRequest(
+                call_id=f"c{n}",
+                name="run.status",
+                arguments={"run_id": "00000000-0000-0000-0000-000000000001"},
+            )
+            yield Completion(finish_reason="tool_calls", prompt_tokens=1, completion_tokens=1)
+
+        return generate()
+
+
+def test_ciclo_tool_esegue_registra_e_continua_sullo_stesso_modello() -> None:
+    async def scenario() -> None:
+        principal = Principal(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), Role.OWNER)
+        conversations, conversation_id = _conversations_with_conversation(principal)
+        store = InMemoryRunStore()
+        run = _queued_run(store, conversation_id, principal.organization_id, principal.user_id)
+        gateway = _FakeGateway(ToolResult(content='{"found": true, "state": "running"}'))
+        chat_model = _ToolThenAnswerChatModel()
+        worker = RunWorker(
+            store,
+            conversations,
+            chat_model,
+            tool_gateway=gateway,
+            lease_seconds=5,
+            heartbeat_interval_seconds=10,
+        )
+
+        await worker._claim_and_execute()
+
+        finalized = store.get(principal.scope, run.id)
+        assert finalized is not None
+        assert finalized.state is RunState.COMPLETED
+        assert finalized.partial_text == "Il run è in corso."
+        # Il modello ha chiesto il tool una volta e ha continuato sullo stesso run.
+        assert [c.name for c in gateway.calls] == ["run.status"]
+        assert chat_model.seen_tool_message is True
+
+        invocations = store.list_tool_invocations(principal.scope, run.id)
+        assert len(invocations) == 1
+        assert invocations[0].tool_name == "run.status"
+        assert invocations[0].state is ToolInvocationState.SUCCEEDED
+        assert invocations[0].result == '{"found": true, "state": "running"}'
+
+        types = [e.type for e in store.list_events(principal.scope, run.id, 0).events]
+        assert "tool.executing" in types
+        assert "tool.succeeded" in types
+
+        # Il messaggio persistito porta la risposta finale, non il risultato tool.
+        messages = conversations.list_messages(principal, conversation_id)
+        assert [m.content for m in messages] == ["Ciao", "Il run è in corso."]
+
+    asyncio.run(scenario())
+
+
+def test_tool_result_errore_registra_failed_ma_il_run_continua() -> None:
+    async def scenario() -> None:
+        principal = Principal(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), Role.OWNER)
+        conversations, conversation_id = _conversations_with_conversation(principal)
+        store = InMemoryRunStore()
+        run = _queued_run(store, conversation_id, principal.organization_id, principal.user_id)
+        gateway = _FakeGateway(
+            ToolResult(
+                content='{"error": "tool_not_allowed"}',
+                is_error=True,
+                error_code="tool_not_allowed",
+            )
+        )
+        worker = RunWorker(
+            store,
+            conversations,
+            _ToolThenAnswerChatModel(),
+            tool_gateway=gateway,
+            lease_seconds=5,
+            heartbeat_interval_seconds=10,
+        )
+
+        await worker._claim_and_execute()
+
+        invocations = store.list_tool_invocations(principal.scope, run.id)
+        assert len(invocations) == 1
+        assert invocations[0].state is ToolInvocationState.FAILED
+        assert invocations[0].error_code == "tool_not_allowed"
+        types = [e.type for e in store.list_events(principal.scope, run.id, 0).events]
+        assert "tool.failed" in types
+        # L'errore del tool è un dato per il modello, non un guasto del run:
+        # la generazione continua e completa.
+        finalized = store.get(principal.scope, run.id)
+        assert finalized is not None
+        assert finalized.state is RunState.COMPLETED
+
+    asyncio.run(scenario())
+
+
+def test_limite_turni_tool_ferma_con_tool_budget_exceeded() -> None:
+    async def scenario() -> None:
+        principal = Principal(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), Role.OWNER)
+        conversations, conversation_id = _conversations_with_conversation(principal)
+        store = InMemoryRunStore()
+        run = _queued_run(store, conversation_id, principal.organization_id, principal.user_id)
+        gateway = _FakeGateway()
+        worker = RunWorker(
+            store,
+            conversations,
+            _AlwaysToolChatModel(),
+            tool_gateway=gateway,
+            lease_seconds=5,
+            heartbeat_interval_seconds=10,
+            max_tool_calls=2,
+        )
+
+        await worker._claim_and_execute()
+
+        finalized = store.get(principal.scope, run.id)
+        assert finalized is not None
+        assert finalized.state is RunState.FAILED
+        assert finalized.finish_reason == FINISH_REASON_TOOL_BUDGET_EXCEEDED
+        # Esattamente due turni tool eseguiti prima del limite.
+        assert len(store.list_tool_invocations(principal.scope, run.id)) == 2
+        assert conversations.list_messages(principal, conversation_id) == []
+
+    asyncio.run(scenario())
 
 
 def test_happy_path_claim_checkpoint_finalize_e_persistenza_messaggio() -> None:

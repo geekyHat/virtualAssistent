@@ -12,6 +12,8 @@ from typing import Protocol
 
 from newray.kernel.identity import Scope
 
+from .tool_gateway import ToolInvocationState
+
 
 class RunState(StrEnum):
     QUEUED = "queued"
@@ -98,6 +100,37 @@ EVENT_RUN_COMPLETED = "run.completed"
 EVENT_RUN_FAILED = "run.failed"
 EVENT_RUN_CANCELLED = "run.cancelled"
 EVENT_RUN_INTERRUPTED = "run.interrupted"
+#: Eventi del ciclo tool (P-07, NewRay.md §§8.1, 19.3). Non potati (non
+#: sono ``message.delta``). ``run.waiting_approval`` e gli eventi di
+#: fonte/artefatto di §19.3 restano non emessi: approval gated e nessuna
+#: fonte prima di P-11.
+EVENT_TOOL_EXECUTING = "tool.executing"
+EVENT_TOOL_SUCCEEDED = "tool.succeeded"
+EVENT_TOOL_FAILED = "tool.failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolInvocation:
+    """Ricevuta durevole di una invocazione tool (NewRay.md §8.3).
+
+    Idempotente per ``(run_id, call_id)``: una transizione di stato sulla
+    stessa chiamata aggiorna la riga, non ne crea un'altra. ``result`` e
+    ``error_code`` sono valorizzati solo a esito raggiunto.
+    """
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    call_id: str
+    tool_name: str
+    arguments: Mapping[str, object]
+    state: ToolInvocationState
+    result: str | None
+    error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", freeze_json(self.arguments))
 
 
 def freeze_json(value: object) -> object:
@@ -131,6 +164,9 @@ FINISH_REASON_DEADLINE_EXCEEDED = "deadline_exceeded"
 FINISH_REASON_MODEL_ERROR = "model_error"
 FINISH_REASON_WORKER_LOST = "worker_lost"
 FINISH_REASON_CANCELLED_BY_USER = "cancelled_by_user"
+#: Superato il limite di turni tool per run (P-07, NewRay.md §8.1 passo 7):
+#: la generazione si ferma con un esito esplicito, mai un ciclo infinito.
+FINISH_REASON_TOOL_BUDGET_EXCEEDED = "tool_budget_exceeded"
 
 
 class RunStore(Protocol):
@@ -242,4 +278,34 @@ class RunStore(Protocol):
         queued/running per quella conversazione nello scope del principal
         (conversazione fuori scope inclusa: nessuna riga è visibile sotto
         RLS, non un errore distinto)."""
+        ...
+
+    def record_tool_event(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        invocation_id: uuid.UUID,
+        call_id: str,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        state: ToolInvocationState,
+        event_type: str,
+        result: str | None,
+        error_code: str | None,
+    ) -> DurableRun | None:
+        """Upsert idempotente della ricevuta ``tool_invocation`` e append di
+        un evento tool nello stesso commit fencing-checked (P-07).
+
+        Come heartbeat/finalize: la scrittura vale solo per il worker con il
+        fence corrente sul run ``running``; ``None`` se il fencing è perso
+        (un worker più recente possiede il run) — il chiamante interrompe il
+        ciclo senza scrivere altro. La ricevuta è idempotente per
+        ``(run_id, call_id)``: una transizione di stato aggiorna la riga.
+        """
+        ...
+
+    def list_tool_invocations(self, scope: Scope, run_id: uuid.UUID) -> tuple[ToolInvocation, ...]:
+        """Ricevute tool del run in ordine di creazione, scoped come ``get``
+        (P-07). Vuoto se il run non esiste, è fuori scope o non ha tool."""
         ...

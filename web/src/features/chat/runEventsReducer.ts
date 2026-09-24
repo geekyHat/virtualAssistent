@@ -43,6 +43,8 @@ export interface RunEventState {
   tokensPerSecond: number | null;
   promptTokens: number | null;
   completionTokens: number | null;
+  /** Nome del tool in esecuzione (P-07); null quando nessuno è attivo. */
+  activeTool: string | null;
 }
 
 export const initialRunEventState: RunEventState = {
@@ -55,6 +57,7 @@ export const initialRunEventState: RunEventState = {
   tokensPerSecond: null,
   promptTokens: null,
   completionTokens: null,
+  activeTool: null,
 };
 
 interface TerminalPayload {
@@ -153,6 +156,7 @@ function applyTerminal(
     text,
     sequence,
     cancelRequested: false,
+    activeTool: null,
     promptTokens,
     completionTokens,
     tokensPerSecond: tokensPerSecond(completionTokens, evalDurationNs),
@@ -216,6 +220,23 @@ export function runEventsReducer(state: RunEventState, action: RunEventAction): 
       const text = typeof action.payload.text === "string" ? action.payload.text : state.text;
       return { ...state, status: "streaming", text, sequence: action.sequence };
     }
+    case "tool.executing": {
+      // Il run sta usando un tool: attività non terminale (P-07). Mostra il
+      // nome per l'indicatore live; lo stato resta "streaming".
+      const toolName = typeof action.payload.tool_name === "string" ? action.payload.tool_name : "";
+      return {
+        ...state,
+        status: "streaming",
+        activeTool: toolName || null,
+        sequence: action.sequence,
+      };
+    }
+    case "tool.succeeded":
+    case "tool.failed":
+      // Esito del tool: l'attività si chiude, la generazione continua.
+      // L'esito dettagliato è in GET /runs/{id}/tools; qui basta liberare
+      // l'indicatore. Un tool fallito non è un guasto del run.
+      return { ...state, activeTool: null, sequence: action.sequence };
     case "run.completed":
     case "run.failed":
     case "run.cancelled":

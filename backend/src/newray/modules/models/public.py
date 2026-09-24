@@ -19,6 +19,8 @@ from newray.modules.models.domain import (
     ModelStatus,
     ReadinessState,
     StreamEvent,
+    ToolCallRequest,
+    ToolSchema,
 )
 from newray.modules.models.ports import ChatModel, ModelCatalog
 
@@ -39,4 +41,6 @@ __all__ = [
     "ReadinessState",
     "RUNTIME_OLLAMA",
     "StreamEvent",
+    "ToolCallRequest",
+    "ToolSchema",
 ]

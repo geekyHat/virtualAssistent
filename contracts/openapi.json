@@ -768,6 +768,89 @@
         "title": "RunState",
         "type": "string"
       },
+      "RunToolInvocationDTO": {
+        "description": "Ricevuta pubblica di una invocazione tool (P-07, NewRay.md §8.3).\n\nEspone l'esito osservabile: stato, risultato ed eventuale codice di\nerrore. ``result`` è il contenuto restituito dal tool (già dato, non\nistruzione); il payload interno del gateway non compare qui.",
+        "properties": {
+          "call_id": {
+            "title": "Call Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "call_id",
+          "tool_name",
+          "state",
+          "result",
+          "error_code",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RunToolInvocationDTO",
+        "type": "object"
+      },
+      "RunToolInvocationsDTO": {
+        "description": "Elenco delle ricevute tool di un run, in ordine di creazione.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunToolInvocationDTO"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "RunToolInvocationsDTO",
+        "type": "object"
+      },
       "SessionStatusDTO": {
         "description": "Stato pubblico dell'installazione (``GET /session/status``).\n\nServe alla WebUI per decidere se mostrare bootstrap o login; non\nrivela il nome dell'owner né alcun dettaglio derivato dalla\nsessione, solo la presenza dell'owner.",
         "properties": {
@@ -1721,6 +1804,47 @@
           }
         },
         "summary": "Stream Events"
+      }
+    },
+    "/api/v1/runs/{run_id}/tools": {
+      "get": {
+        "description": "Ricevute tool del run (P-07): esito osservabile di ogni chiamata.\nFuori scope → 404 uniforme (§7.3), come le altre risorse private.",
+        "operationId": "list_run_tools_api_v1_runs__run_id__tools_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunToolInvocationsDTO"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Run Tools"
       }
     },
     "/api/v1/session": {

@@ -72,6 +72,79 @@ test.describe("Chat — run durevoli (P-06)", () => {
     await expect(page.getByTestId("token-rate")).toHaveText("non disponibile");
   });
 
+  test("ciclo tool: gli eventi tool.* non rompono il run, che completa (P-07)", async ({
+    page,
+    session,
+  }) => {
+    session.set({
+      me: { kind: "ok", identity: defaultIdentity },
+      chat: {
+        conversations: [],
+        messages: {},
+        profiles: [defaultProfile],
+        run: { kind: "echo" },
+        durableRun: {
+          kind: "events",
+          events: [
+            { type: "run.queued", payload: {} },
+            { type: "run.started", payload: {} },
+            { type: "tool.executing", payload: { tool_name: "run.status", is_error: false } },
+            { type: "tool.succeeded", payload: { tool_name: "run.status", is_error: false } },
+            { type: "message.delta", payload: { text: "Il run è in corso." } },
+            {
+              type: "run.completed",
+              payload: { finish_reason: "stop", text: "Il run è in corso." },
+            },
+          ],
+        },
+      },
+    });
+    await openConversation(page);
+    await sendAndSettle(page, "Che stato ha il run?");
+
+    await expect(page.getByTestId("run-status")).toHaveText("Completata");
+    await expect(page.locator("[data-role='assistant']").first()).toContainText(
+      "Il run è in corso."
+    );
+  });
+
+  test("tool.failed non è un guasto del run: la generazione completa comunque (P-07)", async ({
+    page,
+    session,
+  }) => {
+    session.set({
+      me: { kind: "ok", identity: defaultIdentity },
+      chat: {
+        conversations: [],
+        messages: {},
+        profiles: [defaultProfile],
+        run: { kind: "echo" },
+        durableRun: {
+          kind: "events",
+          events: [
+            { type: "run.queued", payload: {} },
+            { type: "run.started", payload: {} },
+            { type: "tool.executing", payload: { tool_name: "run.status", is_error: false } },
+            { type: "tool.failed", payload: { tool_name: "run.status", is_error: true } },
+            { type: "message.delta", payload: { text: "Non ho trovato quel run." } },
+            {
+              type: "run.completed",
+              payload: { finish_reason: "stop", text: "Non ho trovato quel run." },
+            },
+          ],
+        },
+      },
+    });
+    await openConversation(page);
+    await sendAndSettle(page, "Stato del run inesistente?");
+
+    await expect(page.getByTestId("run-status")).toHaveText("Completata");
+    await expect(page.getByRole("alert")).not.toBeVisible();
+    await expect(page.locator("[data-role='assistant']").first()).toContainText(
+      "Non ho trovato quel run."
+    );
+  });
+
   test("run.cancelled: interrotta con frammento conservato", async ({ page, session }) => {
     session.set({
       me: { kind: "ok", identity: defaultIdentity },

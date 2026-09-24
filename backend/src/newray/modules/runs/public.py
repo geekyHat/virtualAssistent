@@ -20,18 +20,24 @@ from newray.modules.runs.durable import (
     EVENT_RUN_INTERRUPTED,
     EVENT_RUN_QUEUED,
     EVENT_RUN_STARTED,
+    EVENT_TOOL_EXECUTING,
+    EVENT_TOOL_FAILED,
+    EVENT_TOOL_SUCCEEDED,
     FINISH_REASON_CANCELLED_BY_USER,
     FINISH_REASON_DEADLINE_EXCEEDED,
     FINISH_REASON_EMPTY_OUTPUT,
     FINISH_REASON_MODEL_ERROR,
+    FINISH_REASON_TOOL_BUDGET_EXCEEDED,
     FINISH_REASON_WORKER_LOST,
     DurableRun,
     EventPage,
     RunEvent,
     RunState,
     RunStore,
+    ToolInvocation,
 )
 from newray.modules.runs.durable_application import DurableRunService
+from newray.modules.runs.tool_gateway import ToolGateway, ToolInvocationState, ToolResult
 from newray.modules.runs.worker import RunWorker
 
 __all__ = [
@@ -50,11 +56,16 @@ __all__ = [
     "RunStore",
     "DurableRunService",
     "RunWorker",
+    "ToolGateway",
+    "ToolResult",
+    "ToolInvocation",
+    "ToolInvocationState",
     "FINISH_REASON_DEADLINE_EXCEEDED",
     "FINISH_REASON_EMPTY_OUTPUT",
     "FINISH_REASON_MODEL_ERROR",
     "FINISH_REASON_WORKER_LOST",
     "FINISH_REASON_CANCELLED_BY_USER",
+    "FINISH_REASON_TOOL_BUDGET_EXCEEDED",
     "EVENT_RUN_QUEUED",
     "EVENT_RUN_STARTED",
     "EVENT_MESSAGE_DELTA",
@@ -62,4 +73,7 @@ __all__ = [
     "EVENT_RUN_FAILED",
     "EVENT_RUN_CANCELLED",
     "EVENT_RUN_INTERRUPTED",
+    "EVENT_TOOL_EXECUTING",
+    "EVENT_TOOL_SUCCEEDED",
+    "EVENT_TOOL_FAILED",
 ]

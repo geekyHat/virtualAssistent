@@ -296,6 +296,11 @@ export function ConversationsPage() {
           {activeId ? (
             <>
               <div className="flex min-h-12 items-center justify-end gap-3 border-b border-border px-4 py-2">
+                {chat.activeTool && (
+                  <span className="text-xs text-muted-foreground" data-testid="tool-active">
+                    {t("chat_tool_active")} {chat.activeTool}…
+                  </span>
+                )}
                 <TokenRateMeter
                   label={t("chat_token_rate")}
                   value={chat.tokenRate}

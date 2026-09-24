@@ -374,6 +374,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runs/{run_id}/tools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Run Tools
+         * @description Ricevute tool del run (P-07): esito osservabile di ogni chiamata.
+         *     Fuori scope → 404 uniforme (§7.3), come le altre risorse private.
+         */
+        get: operations["list_run_tools_api_v1_runs__run_id__tools_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/session": {
         parameters: {
             query?: never;
@@ -872,6 +893,49 @@ export interface components {
          * @enum {string}
          */
         RunState: "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled" | "interrupted";
+        /**
+         * RunToolInvocationDTO
+         * @description Ricevuta pubblica di una invocazione tool (P-07, NewRay.md §8.3).
+         *
+         *     Espone l'esito osservabile: stato, risultato ed eventuale codice di
+         *     errore. ``result`` è il contenuto restituito dal tool (già dato, non
+         *     istruzione); il payload interno del gateway non compare qui.
+         */
+        RunToolInvocationDTO: {
+            /** Call Id */
+            call_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error Code */
+            error_code: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Result */
+            result: string | null;
+            /** State */
+            state: string;
+            /** Tool Name */
+            tool_name: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * RunToolInvocationsDTO
+         * @description Elenco delle ricevute tool di un run, in ordine di creazione.
+         */
+        RunToolInvocationsDTO: {
+            /** Items */
+            items: components["schemas"]["RunToolInvocationDTO"][];
+        };
         /**
          * SessionStatusDTO
          * @description Stato pubblico dell'installazione (``GET /session/status``).
@@ -1514,6 +1578,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_run_tools_api_v1_runs__run_id__tools_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunToolInvocationsDTO"];
                 };
             };
             /** @description Validation Error */

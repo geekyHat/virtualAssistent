@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -18,7 +19,14 @@ from newray.modules.conversations import Conversation, Message, MessageRole
 from newray.modules.identity import Organization, Session, User
 from newray.modules.models import ModelInfo, ModelReadiness, ReadinessState
 from newray.modules.profiles import AProfile, ModelBinding, Profile, ProfileVersion
-from newray.modules.runs import DurableRun, EventPage, RunEvent, RunState
+from newray.modules.runs import (
+    DurableRun,
+    EventPage,
+    RunEvent,
+    RunState,
+    ToolInvocation,
+    ToolInvocationState,
+)
 
 
 class FakeClock:
@@ -702,6 +710,8 @@ class InMemoryRunStore:
         self._resources: dict[str, dict[str, object]] = {}
         self._workers: dict[uuid.UUID, datetime] = {}
         self._events: dict[uuid.UUID, list[RunEvent]] = {}
+        #: run_id -> {call_id -> ToolInvocation} (idempotente per call_id)
+        self._tool_invocations: dict[uuid.UUID, dict[str, ToolInvocation]] = {}
 
     def _append_event(self, run: DurableRun, type_: str, payload: dict[str, object]) -> None:
         events = self._events.setdefault(run.id, [])
@@ -784,6 +794,67 @@ class InMemoryRunStore:
         if not candidates:
             return None
         return max(candidates, key=lambda run: run.created_at)
+
+    def record_tool_event(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        invocation_id: uuid.UUID,
+        call_id: str,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        state: ToolInvocationState,
+        event_type: str,
+        result: str | None,
+        error_code: str | None,
+    ) -> DurableRun | None:
+        run = self._runs.get(run_id)
+        if (
+            run is None
+            or run.lease_owner != worker_id
+            or run.fence != fence
+            or run.state is not RunState.RUNNING
+        ):
+            return None
+        now = datetime.now(UTC)
+        by_call = self._tool_invocations.setdefault(run_id, {})
+        existing = by_call.get(call_id)
+        invocation = ToolInvocation(
+            id=existing.id if existing is not None else invocation_id,
+            run_id=run_id,
+            call_id=call_id,
+            tool_name=tool_name,
+            arguments=dict(arguments),
+            state=state,
+            result=result,
+            error_code=error_code,
+            created_at=existing.created_at if existing is not None else now,
+            updated_at=now,
+        )
+        by_call[call_id] = invocation
+        self._append_event(
+            run,
+            event_type,
+            {
+                "call_id": call_id,
+                "tool_name": tool_name,
+                "state": str(state),
+                "is_error": error_code is not None,
+            },
+        )
+        return run
+
+    def list_tool_invocations(self, scope: Scope, run_id: uuid.UUID) -> tuple[ToolInvocation, ...]:
+        run = self._runs.get(run_id)
+        if (
+            run is None
+            or run.organization_id != scope.organization_id
+            or run.owner_id != scope.user_id
+        ):
+            return ()
+        invocations = self._tool_invocations.get(run_id, {}).values()
+        return tuple(sorted(invocations, key=lambda inv: (inv.created_at, inv.call_id)))
 
     def claim(
         self, worker_id: uuid.UUID, lease_seconds: int, resource_id: str

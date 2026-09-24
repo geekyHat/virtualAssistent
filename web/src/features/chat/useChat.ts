@@ -20,6 +20,8 @@ export interface ChatState {
   completionTokens: number | null;
   /** Richiesta di stop inviata, esito autorevole non ancora arrivato. */
   cancelRequested: boolean;
+  /** Tool in esecuzione (P-07), o null. */
+  activeTool: string | null;
   /** Meter «token/s» in forma pronta da mostrare. */
   tokenRate: string;
 }

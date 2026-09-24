@@ -27,8 +27,10 @@ from newray.modules.profiles.adapters.postgres import (
     PostgresProfileRepository,
     PostgresProfileVersionWriter,
 )
-from newray.modules.runs import DurableRunService, InlineRunService, RunStore
+from newray.modules.runs import DurableRunService, InlineRunService, RunStore, ToolGateway
 from newray.modules.runs.adapters.postgres import PostgresRunStore
+from newray.modules.tools import RegistryToolGateway
+from newray.modules.tools.adapters.run_status import RunStatusTool
 
 from .settings import Settings
 
@@ -107,6 +109,13 @@ def build_profile_service(
 def build_run_store(engine: Engine) -> RunStore:
     """Adapter Postgres del run store (P-05), con il ruolo applicativo."""
     return PostgresRunStore(engine)
+
+
+def build_tool_gateway(store: RunStore) -> ToolGateway:
+    """Gateway tool del pilot (P-07): solo il tool locale di sola lettura
+    ``run.status``. Il gateway è l'autorità server-side (allowlist/schema);
+    condivide lo stesso run store del worker per la lettura scoped."""
+    return RegistryToolGateway((RunStatusTool(store),))
 
 
 def build_durable_run_service(

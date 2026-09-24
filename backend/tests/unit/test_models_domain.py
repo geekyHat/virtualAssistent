@@ -91,7 +91,7 @@ def test_chat_message_contenuto_fuori_limite() -> None:
 
 
 def test_ruoli_hanno_valori_stabili() -> None:
-    assert [role.value for role in ChatRole] == ["system", "user", "assistant"]
+    assert [role.value for role in ChatRole] == ["system", "user", "assistant", "tool"]
 
 
 # --- ChatRequest ----------------------------------------------------------

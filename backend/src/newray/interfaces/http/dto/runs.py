@@ -53,3 +53,27 @@ class RunDTO(BaseModel):
     eval_duration_ns: int | None
     created_at: datetime
     updated_at: datetime
+
+
+class RunToolInvocationDTO(BaseModel):
+    """Ricevuta pubblica di una invocazione tool (P-07, NewRay.md §8.3).
+
+    Espone l'esito osservabile: stato, risultato ed eventuale codice di
+    errore. ``result`` è il contenuto restituito dal tool (già dato, non
+    istruzione); il payload interno del gateway non compare qui.
+    """
+
+    id: uuid.UUID
+    call_id: str
+    tool_name: str
+    state: str
+    result: str | None
+    error_code: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RunToolInvocationsDTO(BaseModel):
+    """Elenco delle ricevute tool di un run, in ordine di creazione."""
+
+    items: list[RunToolInvocationDTO]

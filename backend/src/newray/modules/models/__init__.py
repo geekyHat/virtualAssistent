@@ -22,6 +22,8 @@ from newray.modules.models.public import (
     ModelStatus,
     ReadinessState,
     StreamEvent,
+    ToolCallRequest,
+    ToolSchema,
 )
 
 __all__ = [
@@ -41,4 +43,6 @@ __all__ = [
     "ReadinessState",
     "RUNTIME_OLLAMA",
     "StreamEvent",
+    "ToolCallRequest",
+    "ToolSchema",
 ]

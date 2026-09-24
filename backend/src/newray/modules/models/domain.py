@@ -12,6 +12,7 @@ di dominio (NewRay.md §6.1).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
@@ -84,25 +85,79 @@ class ModelInfo:
 
 
 class ChatRole(StrEnum):
-    """Ruoli dei messaggi nel contesto di chat (NewRay.md §8.2)."""
+    """Ruoli dei messaggi nel contesto di chat (NewRay.md §8.2).
+
+    ``TOOL`` porta il risultato di un tool nel contesto della continuazione
+    (NewRay.md §8.1 passo 7): è un dato, non un'istruzione privilegiata, e
+    la provenienza resta esplicita via ruolo (§8.2).
+    """
 
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"
 
 
 @dataclass(frozen=True, slots=True)
 class ChatMessage:
-    """Messaggio del contesto di chat: provenienza esplicita via ruolo."""
+    """Messaggio del contesto di chat: provenienza esplicita via ruolo.
+
+    ``tool_call_id`` collega un messaggio ``TOOL`` alla chiamata che lo ha
+    prodotto (contratto di continuazione, NewRay.md §8.1); è ``None`` per
+    ogni altro ruolo.
+    """
 
     role: ChatRole
     content: str
+    tool_call_id: str | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= len(self.content) <= MAX_CHAT_MESSAGE_LENGTH:
             raise ValueError(
                 f"ChatMessage: contenuto fuori dai limiti (1-{MAX_CHAT_MESSAGE_LENGTH})"
             )
+        if self.tool_call_id is not None and self.role is not ChatRole.TOOL:
+            raise ValueError("ChatMessage: tool_call_id valido solo per il ruolo TOOL")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSchema:
+    """Schema di un tool offerto al modello (NewRay.md §§8.1, 10.3).
+
+    Solo la superficie che il modello vede: nome stabile (ID mappato,
+    es. ``run.status``), descrizione e schema JSON dei parametri. L'autorità
+    (allowlist, grant, esecuzione) vive nel gateway tool, non qui: questo è
+    il contratto di wire verso il runtime, senza dipendenza dal provider.
+    """
+
+    name: str
+    description: str
+    parameters: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("ToolSchema: il nome non può essere vuoto")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallRequest:
+    """Richiesta di tool emessa dal modello nello stream (NewRay.md §8.1).
+
+    ``call_id`` identifica la chiamata per la ricevuta idempotente e per
+    collegare il ``ChatMessage`` TOOL della continuazione. ``arguments`` è
+    contenuto non fidato del modello: il gateway lo valida contro lo schema
+    e non ne deriva mai principal o path (§8.1, §10.3).
+    """
+
+    call_id: str
+    name: str
+    arguments: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if not self.call_id:
+            raise ValueError("ToolCallRequest: call_id non può essere vuoto")
+        if not self.name:
+            raise ValueError("ToolCallRequest: name non può essere vuoto")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +179,10 @@ class ChatRequest:
     parameters: dict[str, object] = field(default_factory=dict)
     max_tokens: int | None = None
     inactivity_timeout: timedelta | None = None
+    #: Tool offerti al modello per questo turno (NewRay.md §10.3): il toolset
+    #: è già l'intersezione decisa dal gateway (capacità profilo/installati/
+    #: grant), non tutti i tool installati. Vuoto = nessun tool offerto.
+    tools: tuple[ToolSchema, ...] = ()
 
     def __post_init__(self) -> None:
         if not 1 <= len(self.model) <= MAX_MODEL_NAME_LENGTH:
@@ -188,5 +247,7 @@ class Completion:
         return round(self.completion_tokens / (self.eval_duration_ns / 1_000_000_000), 2)
 
 
-#: Evento prodotto dallo stream di un ``ChatModel`` (NewRay.md §6.1).
-StreamEvent = ContentDelta | Completion
+#: Evento prodotto dallo stream di un ``ChatModel`` (NewRay.md §6.1, §8.1).
+#: ``ToolCallRequest`` è emesso quando il modello chiede un tool; il worker
+#: lo esegue tramite il gateway e continua con lo stesso modello (§8.1).
+StreamEvent = ContentDelta | Completion | ToolCallRequest

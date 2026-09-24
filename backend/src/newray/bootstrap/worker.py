@@ -23,6 +23,7 @@ from .wiring import (
     build_conversation_service,
     build_ollama_client,
     build_run_store,
+    build_tool_gateway,
 )
 
 logger = logging.getLogger("newray.worker")
@@ -44,10 +45,12 @@ async def main() -> None:
     try:
         conversations = build_conversation_service(engine)
         chat_model = build_chat_model(ollama_client, settings)
+        run_store = build_run_store(engine)
         worker = RunWorker(
-            build_run_store(engine),
+            run_store,
             conversations,
             chat_model,
+            tool_gateway=build_tool_gateway(run_store),
             max_duration_seconds=settings.run_max_duration_seconds,
         )
         await worker.register(pid=os.getpid(), hostname=socket.gethostname())

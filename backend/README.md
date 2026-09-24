@@ -152,6 +152,32 @@ sono validati dai settings.
 psycopg è LGPL-2.1 (scelta di base NewRay.md §4.2): compatibile con l'uso
 previsto; la licenza del progetto resta da decidere prima della pubblicazione.
 
+## Comandi verificati (24 settembre 2026, slice ciclo tool P-07)
+
+Ambiente: PostgreSQL 16 + pgvector 0.6.0 nativi (cluster `127.0.0.1:5432`,
+ruoli `newray_migrate`/`newray_app`/`newray_scheduler`). Nessun Ollama/GPU:
+ciclo tool provato con `ChatModel` fake (l'adapter Ollama non emette ancora
+`ToolCallRequest`; live tool use = P-20).
+
+- `.venv/bin/python -m pytest -q tests/unit tests/contracts tests/integration`
+  da `backend/`: **433 passed**, 2 warning di terze parti. Nuovi:
+  `test_tool_gateway.py` (6), `test_tool_invocations_integration.py` (3,
+  PostgreSQL reale: ricevuta idempotente + eventi tool in ordine, fencing,
+  RLS), estensioni a `test_run_worker.py` (3 sul ciclo tool) e
+  `test_http_run_events.py` (4 su `GET /runs/{id}/tools` e eventi `tool.*`).
+- `.venv/bin/ruff check src tests`, `.venv/bin/ruff format --check src tests`,
+  `.venv/bin/mypy src` (82 sorgenti): verdi.
+- `python scripts/check_architecture.py` (dal root): 82 file, verde
+  (`tools` importa `runs.public`, `runs` non importa `tools`: nessun ciclo).
+- `python scripts/generate_contracts.py --check` (dal root): nessun drift
+  dopo la rigenerazione con `GET /runs/{id}/tools`.
+- `web`: `npm run check` (format/lint/typecheck/**88 Vitest**/licenze/build/
+  bundle 466,2 KB JS): verde. `npx playwright test --project=ui`: **57
+  passed, 7 skipped** (stesso limite Playwright di P-05/P-06: eseguibile
+  puntato via modifica locale non commessa, ripristinata prima del commit).
+- `NEWRAY_LIVE_START_TEST=1 scripts/tests/test_start_local.py`: **8/8**,
+  incluse le migrazioni fino alla 0012 e il worker con il gateway tool.
+
 ## Comandi verificati (24 settembre 2026, chiusura P-06)
 
 Ambiente: PostgreSQL 16 + pgvector 0.6.0 nativi (cluster `127.0.0.1:5432`,

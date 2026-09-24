@@ -16,7 +16,12 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Depends, Query, Request
 from starlette.responses import StreamingResponse
 
-from newray.interfaces.http.dto.runs import CreateRunRequest, RunDTO
+from newray.interfaces.http.dto.runs import (
+    CreateRunRequest,
+    RunDTO,
+    RunToolInvocationDTO,
+    RunToolInvocationsDTO,
+)
 from newray.interfaces.http.errors import correlation_id
 from newray.interfaces.http.middleware.identity import require_principal
 from newray.interfaces.http.routes import API_PREFIX
@@ -31,6 +36,7 @@ from newray.modules.runs import (
     DurableRun,
     DurableRunService,
     RunState,
+    ToolInvocation,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +65,19 @@ def _run(run: DurableRun) -> RunDTO:
         eval_duration_ns=run.eval_duration_ns,
         created_at=run.created_at,
         updated_at=run.updated_at,
+    )
+
+
+def _tool_dto(invocation: ToolInvocation) -> RunToolInvocationDTO:
+    return RunToolInvocationDTO(
+        id=invocation.id,
+        call_id=invocation.call_id,
+        tool_name=invocation.tool_name,
+        state=str(invocation.state),
+        result=invocation.result,
+        error_code=invocation.error_code,
+        created_at=invocation.created_at,
+        updated_at=invocation.updated_at,
     )
 
 
@@ -126,6 +145,18 @@ def build_router(poll_interval_seconds: float = DEFAULT_EVENTS_POLL_SECONDS) -> 
         service: DurableRunService = request.app.state.durable_run_service
         run = await service.get(principal, run_id)
         return _run(run)
+
+    @router.get("/runs/{run_id}/tools", response_model=RunToolInvocationsDTO)
+    async def list_run_tools(
+        run_id: uuid.UUID,
+        request: Request,
+        principal: Principal = Depends(require_principal),
+    ) -> RunToolInvocationsDTO:
+        """Ricevute tool del run (P-07): esito osservabile di ogni chiamata.
+        Fuori scope → 404 uniforme (§7.3), come le altre risorse private."""
+        service: DurableRunService = request.app.state.durable_run_service
+        invocations = await service.tool_invocations(principal, run_id)
+        return RunToolInvocationsDTO(items=[_tool_dto(inv) for inv in invocations])
 
     @router.post("/runs/{run_id}/cancel", response_model=RunDTO)
     async def cancel_run(
