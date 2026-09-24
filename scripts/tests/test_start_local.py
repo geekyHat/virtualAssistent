@@ -124,6 +124,21 @@ class LiveLauncherTests(unittest.TestCase):
             origin = f"http://127.0.0.1:{web_port}"
             processes = []
 
+            def _worker_env() -> dict[str, str] | None:
+                # Il launcher scrive le credenziali risolte in
+                # database.json (P-05): il worker non espone porte HTTP,
+                # la sua readiness si legge dalla stessa liveness DB che
+                # usa ``start.worker_ready`` nel processo del launcher.
+                path = data / "launcher/database.json"
+                if not path.exists():
+                    return None
+                config = json.loads(path.read_text())
+                dsn = (
+                    f"postgresql+psycopg://newray_app:{config['app']}"
+                    f"@127.0.0.1:{config['port']}/newray"
+                )
+                return {start.APP_DSN: dsn}
+
             def launch():
                 log = (data / f"launcher-{len(processes)}.log").open("w")
                 process = subprocess.Popen(
@@ -144,9 +159,11 @@ class LiveLauncherTests(unittest.TestCase):
                         and b"newray-workspace" in body
                         and start.api_ready(origin, origin[7:])
                     ):
-                        return process
+                        worker_env = _worker_env()
+                        if worker_env is not None and start.worker_ready(worker_env):
+                            return process
                     time.sleep(0.25)
-                self.fail("launcher timeout")
+                self.fail("launcher timeout (API/WebUI pronti, worker run mai registrato)")
 
             try:
                 first = launch()

@@ -20,16 +20,18 @@ from newray.interfaces.http.routes.chat import build_router as build_chat_router
 from newray.interfaces.http.routes.conversations import build_router as build_conversations_router
 from newray.interfaces.http.routes.identity import build_router as build_identity_router
 from newray.interfaces.http.routes.profiles import build_router as build_profiles_router
+from newray.interfaces.http.routes.runs import build_router as build_runs_router
 from newray.modules.conversations import ConversationService
 from newray.modules.identity import IdentityService
 from newray.modules.models import ChatModel
 from newray.modules.profiles import ProfileService
-from newray.modules.runs import InlineRunService
+from newray.modules.runs import DurableRunService, InlineRunService, RunStore
 
 from .settings import Settings
 from .wiring import (
     build_chat_model,
     build_conversation_service,
+    build_durable_run_service,
     build_identity_service,
     build_model_catalog,
     build_ollama_client,
@@ -46,11 +48,15 @@ def create_app(
     chat_model: ChatModel | None = None,
     *,
     public_origin: str = "http://testserver",
+    run_store: RunStore | None = None,
+    runs_max_queue_depth: int = 50,
 ) -> FastAPI:
     """Applicazione FastAPI attorno ai servizi iniettati.
 
     ``ollama_client`` è il client di egress verso il runtime (B-03): se
     presente viene chiuso in modo ordinato alla dismissione dell'app.
+    ``run_store`` abilita la route dei run durevoli (P-05) quando fornito
+    insieme a ``chat_model``; nei test un fake basta a coprire il contratto.
     """
 
     @asynccontextmanager
@@ -66,7 +72,12 @@ def create_app(
     app.state.conversation_service = conversations
     app.state.profile_service = profiles
     if chat_model is not None:
-        app.state.inline_run_service = InlineRunService(conversations, profiles, chat_model)
+        inline = InlineRunService(conversations, profiles, chat_model)
+        app.state.inline_run_service = inline
+        if run_store is not None:
+            app.state.durable_run_service = DurableRunService(
+                run_store, inline, max_queue_depth=runs_max_queue_depth
+            )
     return app
 
 
@@ -82,6 +93,7 @@ def _http_app(
     app.include_router(build_conversations_router())
     app.include_router(build_profiles_router())
     app.include_router(build_chat_router())
+    app.include_router(build_runs_router())
     return app
 
 
@@ -115,11 +127,13 @@ def build_app() -> FastAPI:
             app.state.conversation_service = build_conversation_service(engine)
             catalog = build_model_catalog(ollama_client)
             app.state.profile_service = build_profile_service(engine, settings, catalog)
-            app.state.inline_run_service = InlineRunService(
+            inline = InlineRunService(
                 app.state.conversation_service,
                 app.state.profile_service,
                 build_chat_model(ollama_client, settings),
             )
+            app.state.inline_run_service = inline
+            app.state.durable_run_service = build_durable_run_service(engine, inline, settings)
             yield
 
     return _http_app(lifespan, settings.cookie_secure, settings.public_origin)

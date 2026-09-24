@@ -109,6 +109,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{conversation_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Run
+         * @description Accoda un run durevole; il worker lo consuma in background (P-05).
+         */
+        post: operations["create_run_api_v1_conversations__conversation_id__runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -251,6 +271,26 @@ export interface paths {
          *     dal catalogo → 503 ``MODEL_UNAVAILABLE`` recuperabile.
          */
         post: operations["switch_model_api_v1_profiles__profile_id__versions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Run
+         * @description Snapshot del run; fuori scope → 404 (§7.3).
+         */
+        get: operations["get_run_api_v1_runs__run_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -449,6 +489,25 @@ export interface components {
             content: string;
             /** Idempotency Key */
             idempotency_key?: string | null;
+        };
+        /**
+         * CreateRunRequest
+         * @description Creazione di un run durevole: profilo, messaggio e idempotenza.
+         *
+         *     ``idempotency_key`` è obbligatoria: il retry della stessa richiesta
+         *     restituisce lo stesso run senza rieseguirlo; stessa chiave con
+         *     contenuto/profilo diverso risponde 409.
+         */
+        CreateRunRequest: {
+            /** Content */
+            content: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /**
+             * Profile Id
+             * Format: uuid
+             */
+            profile_id: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -682,6 +741,43 @@ export interface components {
          */
         Role: "owner" | "member" | "administrator";
         /**
+         * RunDTO
+         * @description Snapshot pubblico del run: stato e progresso, non il binding interno.
+         */
+        RunDTO: {
+            /** Completion Tokens */
+            completion_tokens: number | null;
+            /**
+             * Conversation Id
+             * Format: uuid
+             */
+            conversation_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Eval Duration Ns */
+            eval_duration_ns: number | null;
+            /** Finish Reason */
+            finish_reason: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Partial Text */
+            partial_text: string;
+            /** Prompt Tokens */
+            prompt_tokens: number | null;
+            state: components["schemas"]["RunState"];
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
          * RunRequest
          * @description Richiesta di generazione: messaggio utente e profilo selezionato.
          */
@@ -694,6 +790,11 @@ export interface components {
              */
             profile_id: string;
         };
+        /**
+         * RunState
+         * @enum {string}
+         */
+        RunState: "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled" | "interrupted";
         /**
          * SessionStatusDTO
          * @description Stato pubblico dell'installazione (``GET /session/status``).
@@ -1022,6 +1123,41 @@ export interface operations {
             };
         };
     };
+    create_run_api_v1_conversations__conversation_id__runs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDTO"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     me_api_v1_me_get: {
         parameters: {
             query?: never;
@@ -1175,6 +1311,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProfileDTO"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_run_api_v1_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDTO"];
                 };
             };
             /** @description Validation Error */

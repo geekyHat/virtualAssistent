@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     #: Budget iniziale prudente; non modifica tag o Modelfile già installati.
     model_context_length: int = Field(default=8192, ge=1024, le=16384)
     model_max_context_length: int = Field(default=16384, ge=1024, le=32768)
+    #: Limite di coda per scope (P-05, NewRay.md §8.4). Valore iniziale
+    #: dichiarato, non misurato: da tarare in P-19/P-20.
+    runs_max_queue_depth: int = Field(default=50, ge=1, le=10_000)
+    #: Deadline complessiva di una generazione durevole (P-05). Valore
+    #: iniziale dichiarato, non misurato.
+    run_max_duration_seconds: int = Field(default=300, ge=1, le=3_600)
 
     @model_validator(mode="after")
     def _valida_budget_modello(self) -> Settings:

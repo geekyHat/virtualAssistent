@@ -1,8 +1,8 @@
-"""Prima slice P-05: creazione idempotente e lettura di snapshot durevoli.
+"""P-05: creazione idempotente e lettura di snapshot dei run durevoli.
 
-La coda non è ancora consumata dal worker: finché claim, fencing e
-riconciliazione non sono qualificati, questa slice resta interna e non
-pubblica una route che prometterebbe esecuzione.
+Il consumo della coda (claim/heartbeat/fencing/finalize) è in ``worker.py``;
+questo servizio resta la sola porta di scrittura per la creazione e la
+sola porta di lettura scoped per lo snapshot, usate dalla route HTTP.
 """
 
 from __future__ import annotations
@@ -14,11 +14,19 @@ import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
-from newray.kernel.errors import Conflict, NotFound
+from newray.kernel.errors import Conflict, NotFound, QueueFull
 from newray.kernel.identity import Principal, new_id
 
 from .application import InlineRunService
 from .durable import DurableRun, RunState, RunStore
+
+#: Limite di coda per scope (organizzazione/proprietario), non globale: il
+#: pilot è a singolo proprietario per installazione (ADR 0002). Valore
+#: iniziale dichiarato (NewRay.md §8.4 non fissa numeri), da tarare in
+#: P-19/P-20. La risoluzione da ``NEWRAY_RUNS_MAX_QUEUE_DEPTH`` è nel
+#: bootstrap (``Settings``), mai letta qui: l'applicazione resta senza I/O
+#: d'ambiente diretto.
+DEFAULT_MAX_QUEUE_DEPTH = 50
 
 
 def _json_value(value: object) -> object:
@@ -42,9 +50,16 @@ def _payload_hash(profile_id: uuid.UUID, content: str) -> str:
 class DurableRunService:
     """Run accodati; nessun avvio automatico fino al worker P-05."""
 
-    def __init__(self, store: RunStore, inline: InlineRunService) -> None:
+    def __init__(
+        self,
+        store: RunStore,
+        inline: InlineRunService,
+        *,
+        max_queue_depth: int = DEFAULT_MAX_QUEUE_DEPTH,
+    ) -> None:
         self._store = store
         self._inline = inline
+        self._max_queue_depth = max_queue_depth
 
     async def create(
         self,
@@ -64,6 +79,10 @@ class DurableRunService:
             if existing.payload_hash != payload_hash:
                 raise Conflict("chiave di idempotenza riutilizzata con richiesta diversa")
             return existing
+
+        active = await asyncio.to_thread(self._store.count_active, principal.scope)
+        if active >= self._max_queue_depth:
+            raise QueueFull("coda dei run al limite: riprovare più tardi")
 
         prepared = await self._inline.prepare(principal, conversation_id, profile_id, content)
         binding = prepared.binding

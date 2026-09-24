@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 from newray.kernel.errors import Conflict, NotFound
 from newray.kernel.identity import Role, Scope, new_id
@@ -17,6 +18,7 @@ from newray.modules.conversations import Conversation, Message, MessageRole
 from newray.modules.identity import Organization, Session, User
 from newray.modules.models import ModelInfo, ModelReadiness, ReadinessState
 from newray.modules.profiles import AProfile, ModelBinding, Profile, ProfileVersion
+from newray.modules.runs import DurableRun, RunState
 
 
 class FakeClock:
@@ -677,3 +679,200 @@ class InMemoryProfileVersionWriter:
             key = (scope.organization_id, scope.user_id, profile_id, idempotency_key)
             self._switches[key] = (request_hash, version.id)
         return version, binding
+
+
+class InMemoryRunStore:
+    """Implementazione di test di ``RunStore`` (P-05), fencing incluso.
+
+    Riproduce la semantica delle funzioni SQL SECURITY DEFINER (ADR 0007):
+    claim/heartbeat/finalize sono fencing-checked, il resource lease è
+    condiviso fra tutti gli scope (nessuna riga scope-based). A differenza
+    dell'adapter Postgres, le risorse non richiedono un seed esplicito: la
+    prima ``claim`` su un ``resource_id`` la inizializza libera.
+    """
+
+    def __init__(self) -> None:
+        self._runs: dict[uuid.UUID, DurableRun] = {}
+        #: resource_id -> {"owner_worker", "owner_run", "lease_until"}
+        self._resources: dict[str, dict[str, object]] = {}
+        self._workers: dict[uuid.UUID, datetime] = {}
+
+    def enqueue(self, run: DurableRun) -> DurableRun:
+        existing = self.find_by_key(
+            Scope(run.organization_id, run.owner_id), run.conversation_id, run.idempotency_key
+        )
+        if existing is not None:
+            if existing.payload_hash != run.payload_hash:
+                raise Conflict("chiave di idempotenza riutilizzata con richiesta diversa")
+            return existing
+        self._runs[run.id] = run
+        return run
+
+    def get(self, scope: Scope, run_id: uuid.UUID) -> DurableRun | None:
+        run = self._runs.get(run_id)
+        if (
+            run is None
+            or run.organization_id != scope.organization_id
+            or (run.owner_id != scope.user_id)
+        ):
+            return None
+        return run
+
+    def find_by_key(
+        self, scope: Scope, conversation_id: uuid.UUID, idempotency_key: str
+    ) -> DurableRun | None:
+        return next(
+            (
+                run
+                for run in self._runs.values()
+                if run.organization_id == scope.organization_id
+                and run.owner_id == scope.user_id
+                and run.conversation_id == conversation_id
+                and run.idempotency_key == idempotency_key
+            ),
+            None,
+        )
+
+    def count_active(self, scope: Scope) -> int:
+        return sum(
+            1
+            for run in self._runs.values()
+            if run.organization_id == scope.organization_id
+            and run.owner_id == scope.user_id
+            and run.state in (RunState.QUEUED, RunState.RUNNING)
+        )
+
+    def claim(
+        self, worker_id: uuid.UUID, lease_seconds: int, resource_id: str
+    ) -> DurableRun | None:
+        now = datetime.now(UTC)
+        lease = self._resources.get(resource_id)
+        if lease is not None and lease["lease_until"] > now and lease["owner_worker"] != worker_id:
+            return None
+        candidates = sorted(
+            (run for run in self._runs.values() if run.state is RunState.QUEUED),
+            key=lambda run: run.created_at,
+        )
+        if not candidates:
+            return None
+        run = candidates[0]
+        updated = replace(
+            run,
+            state=RunState.RUNNING,
+            lease_owner=worker_id,
+            lease_until=now + timedelta(seconds=lease_seconds),
+            fence=run.fence + 1,
+            updated_at=now,
+        )
+        self._runs[run.id] = updated
+        self._resources[resource_id] = {
+            "owner_worker": worker_id,
+            "owner_run": run.id,
+            "lease_until": now + timedelta(seconds=lease_seconds),
+        }
+        return updated
+
+    def heartbeat(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        lease_seconds: int,
+        partial_text: str,
+        resource_id: str,
+    ) -> DurableRun | None:
+        run = self._runs.get(run_id)
+        if (
+            run is None
+            or run.lease_owner != worker_id
+            or run.fence != fence
+            or run.state is not RunState.RUNNING
+        ):
+            return None
+        now = datetime.now(UTC)
+        updated = replace(
+            run,
+            partial_text=partial_text,
+            lease_until=now + timedelta(seconds=lease_seconds),
+            updated_at=now,
+        )
+        self._runs[run_id] = updated
+        lease = self._resources.get(resource_id)
+        if (
+            lease is not None
+            and lease["owner_worker"] == worker_id
+            and lease["owner_run"] == run_id
+        ):
+            lease["lease_until"] = now + timedelta(seconds=lease_seconds)
+        return updated
+
+    def finalize(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        state: RunState,
+        finish_reason: str | None,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        eval_duration_ns: int | None,
+        partial_text: str,
+        resource_id: str,
+    ) -> DurableRun | None:
+        run = self._runs.get(run_id)
+        if (
+            run is None
+            or run.lease_owner != worker_id
+            or run.fence != fence
+            or run.state is not RunState.RUNNING
+        ):
+            return None
+        updated = replace(
+            run,
+            state=state,
+            finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            eval_duration_ns=eval_duration_ns,
+            partial_text=partial_text,
+            updated_at=datetime.now(UTC),
+        )
+        self._runs[run_id] = updated
+        lease = self._resources.get(resource_id)
+        if (
+            lease is not None
+            and lease["owner_worker"] == worker_id
+            and lease["owner_run"] == run_id
+        ):
+            del self._resources[resource_id]
+        return updated
+
+    def reclaim_stale(self, grace_seconds: int) -> tuple[DurableRun, ...]:
+        now = datetime.now(UTC)
+        recovered: list[DurableRun] = []
+        for run in list(self._runs.values()):
+            if run.state is not RunState.RUNNING or run.lease_until is None:
+                continue
+            if run.lease_until >= now:
+                continue
+            last_heartbeat = self._workers.get(run.lease_owner) if run.lease_owner else None
+            worker_alive = last_heartbeat is not None and last_heartbeat > now - timedelta(
+                seconds=grace_seconds
+            )
+            if worker_alive:
+                continue
+            updated = replace(
+                run, state=RunState.INTERRUPTED, finish_reason="worker_lost", updated_at=now
+            )
+            self._runs[run.id] = updated
+            for resource_id, lease in list(self._resources.items()):
+                if lease["owner_run"] == run.id:
+                    del self._resources[resource_id]
+            recovered.append(updated)
+        return tuple(recovered)
+
+    def register_worker(self, worker_id: uuid.UUID, pid: int, hostname: str) -> None:
+        self._workers[worker_id] = datetime.now(UTC)
+
+    def touch_worker(self, worker_id: uuid.UUID) -> None:
+        self._workers[worker_id] = datetime.now(UTC)

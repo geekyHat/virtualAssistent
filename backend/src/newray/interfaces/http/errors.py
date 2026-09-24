@@ -32,10 +32,11 @@ _STATUS_BY_CODE: dict[str, int] = {
     "MODEL_UNAVAILABLE": 503,
     "INFERENCE_FAILED": 502,
     "INFERENCE_TIMEOUT": 504,
+    "QUEUE_FULL": 503,
 }
 
 #: Codici per cui un nuovo tentativo identico può avere esito diverso.
-_RETRYABLE_CODES: frozenset[str] = frozenset({"INFERENCE_TIMEOUT"})
+_RETRYABLE_CODES: frozenset[str] = frozenset({"INFERENCE_TIMEOUT", "QUEUE_FULL"})
 
 _INTERNAL_CODE = "INTERNAL"
 _VALIDATION_CODE = "VALIDATION_ERROR"

@@ -6,12 +6,12 @@ istruzioni di sviluppo.
 
 | Percorso | Contenuto |
 | --- | --- |
-| src/newray/bootstrap/ | App API, composizione, settings validati ed entrypoint uvicorn — creato in A-04 (worker negli incrementi successivi) |
+| src/newray/bootstrap/ | App API (entrypoint uvicorn) e worker dei run durevoli (`python -m newray.bootstrap.worker`, P-05), composizione e settings validati |
 | src/newray/kernel/ | Principal/ID, errori e clock iniettabile — creato in A-02 |
-| src/newray/modules/ | identity, profiles, conversations, models e `runs` (owner della preview inline transitoria); dominio/casi d'uso dipendono solo da porte pubbliche, gli adapter PostgreSQL/Ollama restano ai bordi |
+| src/newray/modules/ | identity, profiles, conversations, models e `runs` (preview inline transitoria, run durevoli e worker P-05); dominio/casi d'uso dipendono solo da porte pubbliche, gli adapter PostgreSQL/Ollama restano ai bordi |
 | src/newray/interfaces/http/ | middleware identity (A-02); route, DTO Pydantic e error mapping (NewRay.md §19) — creati in A-04 |
 | src/newray/infrastructure/ | database (engine, contesto transazionale) — A-03; network (client egress httpx, unico punto del vendor) — B-03; processi, segreti e osservabilità con i relativi casi d'uso (incrementi B/C) |
-| migrations/ | Revisioni Alembic — da 0001 identity a 0007 identity scope hardening; tabelle, backfill, RLS e grant evolvono solo tramite migrazioni |
+| migrations/ | Revisioni Alembic — da 0001 identity a 0010 worker/scheduler dei run durevoli (P-05); tabelle, backfill, RLS e grant evolvono solo tramite migrazioni |
 | scripts/db/ | bootstrap.sql: ruoli DB, database ed estensione pgvector (superuser, solo sviluppo locale) |
 | tests/ | unit, contracts (fake) e integration (PostgreSQL reale, RLS) — integration creato in A-03 |
 
@@ -146,6 +146,45 @@ sono validati dai settings.
 
 psycopg è LGPL-2.1 (scelta di base NewRay.md §4.2): compatibile con l'uso
 previsto; la licenza del progetto resta da decidere prima della pubblicazione.
+
+## Comandi verificati (24 settembre 2026, chiusura P-05)
+
+Ambiente: PostgreSQL 16.13 + pgvector 0.6.0 nativi (cluster temporaneo
+`127.0.0.1:5433`, ruoli `newray_migrate`/`newray_app`/`newray_scheduler`
+provisionati da `backend/scripts/db/bootstrap.sql` aggiornato). Nessun
+Ollama/GPU in queste prove: il worker è provato con `ChatModel` fake
+(claim/lease/fencing/checkpoint/deadline), non con inferenza reale — la
+contesa GPU con processi esterni resta P-18/P-20.
+
+- `.venv/bin/python -m pytest -q tests/unit tests/contracts tests/integration`
+  da `backend/`: **400 passed**, 2 warning di terze parti (Starlette/httpx,
+  AnyIO). Include i nuovi `test_run_worker.py` (5, fake),
+  `test_http_durable_runs.py` (6, contratto HTTP) e
+  `test_runs_worker_integration.py` (4, PostgreSQL reale: claim concorrente
+  con esclusività della risorsa, checkpoint/finalize fencing-checked, reclaim
+  di un worker verificato morto con "vecchio worker non può finalizzare",
+  `count_active` scoped per organizzazione).
+- `.venv/bin/ruff check src tests`, `.venv/bin/ruff format --check src tests`,
+  `.venv/bin/mypy src` (74 sorgenti): verdi.
+- `python scripts/check_architecture.py` (dal root): 74 file verificati, verde.
+- `python scripts/generate_contracts.py --check` (dal root): nessun drift.
+- `web`: `npm run check` (format/lint/typecheck/66 Vitest/licenze 640
+  pacchetti/build/bundle 462,7 KB JS – 26,2 KB CSS): verde, nessuna UI nuova
+  in questa chiusura. `npm run e2e` **non eseguito**: la revisione Playwright
+  installata nell'ambiente (1194) non corrisponde a quella richiesta dal
+  pacchetto (1243), limite dell'ambiente di sviluppo, non una regressione di
+  questa modifica.
+- `NEWRAY_LIVE_START_TEST=1 backend/.venv/bin/python scripts/tests/test_start_local.py`
+  (eseguito come utente non privilegiato, PostgreSQL/pgvector nativi,
+  nessun Ollama configurato): **8/8 passed**, incluso il worker: il test di
+  smoke ora attende anche la sua liveness (`run_workers`) oltre a
+  API/WebUI, verifica il riuso al secondo avvio (nessun secondo processo)
+  e l'arresto pulito su Ctrl-C/riavvio del cluster.
+- Verifica manuale supplementare di `./.start --web`: log conferma
+  `Avvio worker run…` → `worker <id> pronto (risorsa gpu:0)` dopo le
+  migrazioni e prima della WebUI, e all'arresto
+  `arresto richiesto: termino il run in corso, poi esco` prima dello
+  shutdown pulito dell'API.
 
 ## Comandi verificati (22 settembre 2026)
 

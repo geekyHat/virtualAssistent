@@ -12,8 +12,17 @@ from newray.modules.runs.domain import (
     InlineRunEvent,
     PreparedInlineRun,
 )
-from newray.modules.runs.durable import DurableRun, RunState, RunStore
+from newray.modules.runs.durable import (
+    FINISH_REASON_DEADLINE_EXCEEDED,
+    FINISH_REASON_EMPTY_OUTPUT,
+    FINISH_REASON_MODEL_ERROR,
+    FINISH_REASON_WORKER_LOST,
+    DurableRun,
+    RunState,
+    RunStore,
+)
 from newray.modules.runs.durable_application import DurableRunService
+from newray.modules.runs.worker import RunWorker
 
 __all__ = [
     "INLINE_CONTEXT_MAX_CHARACTERS",
@@ -28,4 +37,9 @@ __all__ = [
     "RunState",
     "RunStore",
     "DurableRunService",
+    "RunWorker",
+    "FINISH_REASON_DEADLINE_EXCEEDED",
+    "FINISH_REASON_EMPTY_OUTPUT",
+    "FINISH_REASON_MODEL_ERROR",
+    "FINISH_REASON_WORKER_LOST",
 ]

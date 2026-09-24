@@ -27,6 +27,8 @@ from newray.modules.profiles.adapters.postgres import (
     PostgresProfileRepository,
     PostgresProfileVersionWriter,
 )
+from newray.modules.runs import DurableRunService, InlineRunService, RunStore
+from newray.modules.runs.adapters.postgres import PostgresRunStore
 
 from .settings import Settings
 
@@ -99,4 +101,22 @@ def build_profile_service(
         PostgresProfileDefaultsSeeder(engine),
         default_model_name=settings.default_model_name,
         version_writer=PostgresProfileVersionWriter(engine),
+    )
+
+
+def build_run_store(engine: Engine) -> RunStore:
+    """Adapter Postgres del run store (P-05), con il ruolo applicativo."""
+    return PostgresRunStore(engine)
+
+
+def build_durable_run_service(
+    engine: Engine,
+    inline: InlineRunService,
+    settings: Settings,
+) -> DurableRunService:
+    """Casi d'uso dei run durevoli: creazione idempotente e lettura scoped."""
+    return DurableRunService(
+        build_run_store(engine),
+        inline,
+        max_queue_depth=settings.runs_max_queue_depth,
     )

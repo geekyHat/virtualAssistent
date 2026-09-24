@@ -130,3 +130,112 @@ class PostgresRunStore:
                 {"conversation_id": conversation_id, "idempotency_key": idempotency_key},
             ).first()
             return None if row is None else _run(row)
+
+    def count_active(self, scope: Scope) -> int:
+        with self._engine.connect() as conn:
+            _scope(conn, scope)
+            count = conn.execute(
+                text("SELECT count(*) FROM runs WHERE state IN ('queued', 'running')")
+            ).scalar_one()
+            return int(count)
+
+    def claim(
+        self, worker_id: uuid.UUID, lease_seconds: int, resource_id: str
+    ) -> DurableRun | None:
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT " + _COLUMNS + " FROM newray_claim_run(:worker, :lease, :resource)"),
+                {"worker": worker_id, "lease": lease_seconds, "resource": resource_id},
+            ).first()
+            return None if row is None or row.id is None else _run(row)
+
+    def heartbeat(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        lease_seconds: int,
+        partial_text: str,
+        resource_id: str,
+    ) -> DurableRun | None:
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT " + _COLUMNS + " FROM newray_heartbeat_run("
+                    ":run_id, :worker, :fence, :lease, :partial_text, :resource)"
+                ),
+                {
+                    "run_id": run_id,
+                    "worker": worker_id,
+                    "fence": fence,
+                    "lease": lease_seconds,
+                    "partial_text": partial_text,
+                    "resource": resource_id,
+                },
+            ).first()
+            return None if row is None or row.id is None else _run(row)
+
+    def finalize(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        state: RunState,
+        finish_reason: str | None,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        eval_duration_ns: int | None,
+        partial_text: str,
+        resource_id: str,
+    ) -> DurableRun | None:
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT " + _COLUMNS + " FROM newray_finalize_run("
+                    ":run_id, :worker, :fence, :state, :finish_reason, :prompt_tokens, "
+                    ":completion_tokens, :eval_duration_ns, :partial_text, :resource)"
+                ),
+                {
+                    "run_id": run_id,
+                    "worker": worker_id,
+                    "fence": fence,
+                    "state": str(state),
+                    "finish_reason": finish_reason,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "eval_duration_ns": eval_duration_ns,
+                    "partial_text": partial_text,
+                    "resource": resource_id,
+                },
+            ).first()
+            return None if row is None or row.id is None else _run(row)
+
+    def reclaim_stale(self, grace_seconds: int) -> tuple[DurableRun, ...]:
+        with self._engine.begin() as conn:
+            rows = conn.execute(
+                text("SELECT " + _COLUMNS + " FROM newray_reclaim_stale_runs(:grace)"),
+                {"grace": grace_seconds},
+            ).all()
+            return tuple(_run(row) for row in rows)
+
+    def register_worker(self, worker_id: uuid.UUID, pid: int, hostname: str) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO run_workers (worker_id, pid, hostname, started_at, "
+                    "last_heartbeat_at) VALUES (:worker_id, :pid, :hostname, now(), now()) "
+                    "ON CONFLICT (worker_id) DO UPDATE SET pid = EXCLUDED.pid, "
+                    "hostname = EXCLUDED.hostname, started_at = now(), "
+                    "last_heartbeat_at = now()"
+                ),
+                {"worker_id": worker_id, "pid": pid, "hostname": hostname},
+            )
+
+    def touch_worker(self, worker_id: uuid.UUID) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE run_workers SET last_heartbeat_at = now() WHERE worker_id = :worker_id"
+                ),
+                {"worker_id": worker_id},
+            )

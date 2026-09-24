@@ -374,7 +374,7 @@ di produzione. `dompurify` è fissato a 3.4.16.
 
 ### P-05 — Run testuale durevole, worker e scheduler
 
-- **Stato / priorità:** In corso (24/09/2026) / P0.
+- **Stato / priorità:** Completato (24/09/2026) / P0.
 - **Proprietario:** runs/scheduler; porte conversations/profiles/models.
 - **Dipendenze:** P-02, P-03.
 - **Contratto e risultato:** `POST /conversations/{id}/runs` idempotente e
@@ -417,6 +417,101 @@ ruff e mypy verdi. Il cluster PostgreSQL temporaneo usato per queste prove
 è stato fermato. Restano da fare worker/scheduler, lease/fencing, timeout,
 checkpoint del parziale, endpoint/snapshot pubblico, restart e prove di
 contenzione GPU prima della chiusura P-05.
+
+**Chiusura P-05 (24/09/2026).** Migrazione `0010_runs_worker_scheduler`
+aggiunge `run_resource_leases` (lease della risorsa generativa, seed
+`gpu:0`) e `run_workers` (liveness, per distinguere lease scaduto da
+worker verificato morto, NewRay.md §8.4); quattro funzioni SQL
+`SECURITY DEFINER` (`newray_claim_run`, `newray_heartbeat_run`,
+`newray_finalize_run`, `newray_reclaim_stale_runs`) possedute dal nuovo
+ruolo interno NOLOGIN `newray_scheduler` attraversano lo scope fra
+organizzazioni per il claim/checkpoint/finalize/reclaim, senza dare
+BYPASSRLS a `newray_app` (ADR 0007, motiva la deviazione da ADR 0002 nel
+dettaglio). `RunWorker`
+(`backend/src/newray/modules/runs/worker.py`) ricostruisce il
+`ChatRequest` dallo snapshot già congelato a creazione (nessuna
+ri-risoluzione di profilo/binding), rinnova lease/checkpoint con un
+heartbeat concorrente, applica una deadline di durata (non ancora
+budget token/turni: nessun limite di turni esiste prima di P-07, il
+conteggio token è registrato ma non usato come condizione di stop),
+finalizza **prima** di persistere lo scambio in `conversations` così un
+fencing perso fra l'ultimo heartbeat e la fine dello stream non scrive
+alcun messaggio a nome del run. `finish_reason` del modello (incluso
+`length` per il troncamento) è preservato senza reinterpretarlo in un
+altro stato: stessa convenzione già in uso per la preview inline.
+`DurableRunService.create` applica ora un limite di coda **per scope**
+(organizzazione/proprietario, non un limite di sistema: il pilot resta a
+singolo proprietario per installazione, ADR 0002; una coda condivisa fra
+più organizzazioni è F-09), `NEWRAY_RUNS_MAX_QUEUE_DEPTH` (default 50) →
+`QUEUE_FULL` 503. Nuove route pubbliche
+`POST /api/v1/conversations/{id}/runs` e `GET /api/v1/runs/{id}` (solo
+creazione idempotente e lettura snapshot; cancellazione ed
+eventi/stream restano P-06, così `RunState.CANCELLED` resta non
+raggiungibile da questa chiusura). Il worker gira come processo separato
+(`python -m newray.bootstrap.worker`), avviato/riusato/fermato dal
+launcher (`scripts/start_local.py`) con lo stesso pattern già usato per
+Ollama: la sua readiness è la liveness in `run_workers`, non una porta
+HTTP.
+
+Prove reali (PostgreSQL 16.13 + pgvector 0.6.0 nativi, ruoli
+`newray_migrate`/`newray_app`/`newray_scheduler` provisionati da
+`backend/scripts/db/bootstrap.sql` aggiornato — nessun Ollama/GPU: il
+worker è provato con `ChatModel` fake, la contesa GPU con processi
+esterni resta P-18/P-20). `pytest tests/unit tests/contracts
+tests/integration` da `backend/`: **400 passed**, 2 warning di terze
+parti. Integration nuovi (`test_runs_worker_integration.py`, 4 test): due
+claim concorrenti su un resource lease unico → vince uno solo; heartbeat
+fencing-checked (un fence sbagliato non scrive il checkpoint); finalize
+fencing-checked (un secondo finalize sullo stesso run, anche con fence
+corretto, fallisce perché lo stato non è più `running`); reclaim di un
+worker mai registrato in `run_workers` → `interrupted` con parziale
+preservato, e il vecchio worker che prova a finalizzare o a fare un
+ultimo checkpoint dopo il reclaim viene rifiutato — la prova diretta di
+"vecchio worker non può finalizzare"; `count_active` scoped per
+organizzazione. Unit nuovi (`test_run_worker.py`, 5, fake): happy path
+claim→checkpoint→finalize con persistenza del messaggio; deadline
+superata con parziale preservato; stream vuoto → `empty_output`; errore
+del modello a metà stream → `model_error` con parziale preservato;
+fencing perso a metà stream → nessuna scrittura di stato né di
+messaggi. Contract nuovi (`test_http_durable_runs.py`, 6): 201 creazione
++ replay, 409 conflitto, 404 conversazione/run inesistente, 503
+`QUEUE_FULL`, 422 validazione. `ruff check`/`ruff format --check` (src e
+tests), `mypy src` (74 sorgenti), `scripts/check_architecture.py` (74
+file) e `scripts/generate_contracts.py --check`: verdi.
+`NEWRAY_LIVE_START_TEST=1 scripts/tests/test_start_local.py`, eseguito
+come utente non privilegiato: **8/8 passed**, incluso un nuovo controllo
+sulla liveness del worker nel test di avvio/riuso/riavvio (il secondo
+avvio non duplica il worker; l'arresto Ctrl-C lo ferma insieme ad
+API/WebUI). Verifica manuale supplementare di `./.start --web`: log
+conferma l'avvio del worker dopo le migrazioni e il suo arresto
+("termino il run in corso, poi esco") allo shutdown. `npm run check`
+(web): verde, 66 Vitest, licenze, build, bundle 462,7 KB JS/26,2 KB CSS —
+nessuna UI nuova in questa chiusura, solo client TS rigenerato.
+
+**Limiti espliciti.** Nessuna prova con Ollama/GPU reale o processi
+esterni in contesa: quella verifica resta P-18 (deployment) e P-20
+(qualifica live), come già previsto dal ticket. Deadline solo a tempo:
+budget token/turni per-run non è applicato come condizione di stop
+(il conteggio arriva dal modello a fine generazione, non è un limite
+imposto durante lo stream); un limite di turni non ha senso prima del
+ciclo tool di P-07. "Kill/restart" del worker è provato simulando lease
+scaduta + worker mai registrato (integration test), non uccidendo un
+processo OS reale in automatico — la gestione SIGTERM/arresto pulito è
+però verificata dal vivo nella smoke del launcher. La coda limitata è
+per scope, non un limite di sistema condiviso fra organizzazioni
+(coerente con l'installazione a singolo proprietario di ADR 0002; una
+coda di sistema multi-org resta F-09). `deploy/compose.yaml` non avvia
+ancora il worker: trasferito a P-18. `npm run e2e` non eseguito in questa
+chiusura: la revisione Playwright installata nell'ambiente di sviluppo
+non corrisponde a quella richiesta dal pacchetto, limite dell'ambiente,
+non regressione introdotta qui; nessuna UI è comunque cambiata da questa
+chiusura. File principali:
+`backend/migrations/versions/0010_runs_worker_scheduler.py`,
+`backend/src/newray/modules/runs/{worker.py,durable.py,durable_application.py,adapters/postgres.py}`,
+`backend/src/newray/bootstrap/{worker.py,api.py,wiring.py,settings.py}`,
+`backend/src/newray/interfaces/http/{routes/runs.py,dto/runs.py,errors.py}`,
+`backend/scripts/db/bootstrap.sql`, `scripts/start_local.py`,
+[ADR 0007](adr/0007-run-scheduler-role.md).
 
 ### P-06 — Eventi durevoli, stop e migrazione della chat browser
 

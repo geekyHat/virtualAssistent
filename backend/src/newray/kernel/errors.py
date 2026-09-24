@@ -110,3 +110,14 @@ class InferenceTimeout(DomainError):
     """
 
     code = "INFERENCE_TIMEOUT"
+
+
+class QueueFull(DomainError):
+    """La coda dei run durevoli ha raggiunto il limite configurato (P-05,
+    NewRay.md §19.4).
+
+    Non è un errore del payload: il client può ritentare più tardi, ma un
+    retry immediato non cambia l'esito finché la coda resta piena.
+    """
+
+    code = "QUEUE_FULL"

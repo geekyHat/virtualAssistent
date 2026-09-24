@@ -170,6 +170,35 @@
         "title": "CreateMessageRequest",
         "type": "object"
       },
+      "CreateRunRequest": {
+        "description": "Creazione di un run durevole: profilo, messaggio e idempotenza.\n\n``idempotency_key`` è obbligatoria: il retry della stessa richiesta\nrestituisce lo stesso run senza rieseguirlo; stessa chiave con\ncontenuto/profilo diverso risponde 409.",
+        "properties": {
+          "content": {
+            "maxLength": 50000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 96,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "profile_id": {
+            "format": "uuid",
+            "title": "Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "content",
+          "idempotency_key"
+        ],
+        "title": "CreateRunRequest",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -614,6 +643,96 @@
         "title": "Role",
         "type": "string"
       },
+      "RunDTO": {
+        "description": "Snapshot pubblico del run: stato e progresso, non il binding interno.",
+        "properties": {
+          "completion_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Tokens"
+          },
+          "conversation_id": {
+            "format": "uuid",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "eval_duration_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eval Duration Ns"
+          },
+          "finish_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finish Reason"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "partial_text": {
+            "title": "Partial Text",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Tokens"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RunState"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "conversation_id",
+          "state",
+          "partial_text",
+          "finish_reason",
+          "prompt_tokens",
+          "completion_tokens",
+          "eval_duration_ns",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RunDTO",
+        "type": "object"
+      },
       "RunRequest": {
         "description": "Richiesta di generazione: messaggio utente e profilo selezionato.",
         "properties": {
@@ -635,6 +754,19 @@
         ],
         "title": "RunRequest",
         "type": "object"
+      },
+      "RunState": {
+        "enum": [
+          "queued",
+          "running",
+          "waiting_approval",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted"
+        ],
+        "title": "RunState",
+        "type": "string"
       },
       "SessionStatusDTO": {
         "description": "Stato pubblico dell'installazione (``GET /session/status``).\n\nServe alla WebUI per decidere se mostrare bootstrap o login; non\nrivela il nome dell'owner né alcun dettaglio derivato dalla\nsessione, solo la presenza dell'owner.",
@@ -1172,6 +1304,57 @@
         "summary": "Preview inline transitoria; usare i run durevoli quando disponibili"
       }
     },
+    "/api/v1/conversations/{conversation_id}/runs": {
+      "post": {
+        "description": "Accoda un run durevole; il worker lo consuma in background (P-05).",
+        "operationId": "create_run_api_v1_conversations__conversation_id__runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDTO"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Run"
+      }
+    },
     "/api/v1/me": {
       "get": {
         "description": "Utente corrente: identità risolta dal server, mai dal client.",
@@ -1357,6 +1540,47 @@
           }
         },
         "summary": "Switch Model"
+      }
+    },
+    "/api/v1/runs/{run_id}": {
+      "get": {
+        "description": "Snapshot del run; fuori scope → 404 (§7.3).",
+        "operationId": "get_run_api_v1_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDTO"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run"
       }
     },
     "/api/v1/session": {

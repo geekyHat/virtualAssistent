@@ -120,6 +120,30 @@ def web_ready(url: str, host: str, marker: str) -> bool:
     return status == 200 and marker.encode() in body and api_ready(url, host)
 
 
+def worker_ready(env: dict[str, str]) -> bool:
+    """Readiness del worker dei run (P-05): nessuna porta HTTP propria,
+    il segnale è la liveness registrata in ``run_workers`` (migrazione 0010).
+    Una riga con heartbeat recente prova un processo vivo, non solo avviato.
+    """
+    try:
+        engine = create_engine(env[APP_DSN], connect_args={"connect_timeout": 3})
+    except Exception:
+        return False
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT 1 FROM run_workers "
+                    "WHERE last_heartbeat_at > now() - interval '10 seconds' LIMIT 1"
+                )
+            ).first()
+            return row is not None
+    except Exception:
+        return False
+    finally:
+        engine.dispose()
+
+
 def managed_config(state: Path) -> dict[str, str | int]:
     path = state / "database.json"
     if path.exists():
@@ -231,6 +255,18 @@ def ensure_database(state: Path, env: dict[str, str]) -> None:
                         "NOCREATEDB NOCREATEROLE NOBYPASSRLS"
                     ).format(sql.Identifier(role), sql.Literal(password))
                 )
+        # Ruolo interno NOLOGIN: possiede solo le funzioni SECURITY DEFINER
+        # del worker durevole (P-05, ADR 0007). newray_migrate ne diventa
+        # membro solo per poter riassegnare la proprietà di quelle funzioni
+        # dalle migrazioni; newray_app resta senza BYPASSRLS.
+        if not conn.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = 'newray_scheduler'"
+        ).fetchone():
+            conn.execute(
+                "CREATE ROLE newray_scheduler NOSUPERUSER NOCREATEDB "
+                "NOCREATEROLE NOLOGIN BYPASSRLS"
+            )
+        conn.execute("GRANT newray_scheduler TO newray_migrate")
         if not conn.execute("SELECT 1 FROM pg_database WHERE datname = 'newray'").fetchone():
             conn.execute("CREATE DATABASE newray OWNER newray_migrate")
     with psycopg.connect(
@@ -408,6 +444,19 @@ def launch(supervisor: Supervisor) -> None:
             supervisor.wait_ready(lambda: api_ready(api, host), child, "API")
         else:
             print("API già attiva: riutilizzo il servizio.", flush=True)
+        if not worker_ready(env):
+            worker_env = dict(env)
+            worker_env.pop(MIGRATION_DSN, None)
+            worker_env.pop("NEWRAY_DB_MIGRATE_PASSWORD", None)
+            print("Avvio worker run…", flush=True)
+            child = supervisor.start(
+                [sys.executable, "-m", "newray.bootstrap.worker"],
+                worker_env,
+                ROOT / "backend",
+            )
+            supervisor.wait_ready(lambda: worker_ready(env), child, "Worker run")
+        else:
+            print("Worker run già attivo: riutilizzo il servizio.", flush=True)
         if not web_running:
             lock_hash = hashlib.sha256((ROOT / "web/package-lock.json").read_bytes()).hexdigest()
             stamp = ROOT / "web/node_modules/.newray-lock"

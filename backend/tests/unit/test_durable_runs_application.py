@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from newray.kernel.errors import Conflict, NotFound
+from newray.kernel.errors import Conflict, NotFound, QueueFull
 from newray.kernel.identity import Principal, Role, Scope
 from newray.modules.models import ChatMessage, ChatRequest, ChatRole
 from newray.modules.profiles import ResolvedBinding
@@ -43,6 +43,13 @@ class FakeStore:
                 if owner == scope and run.id == run_id
             ),
             None,
+        )
+
+    def count_active(self, scope: Scope) -> int:
+        return sum(
+            1
+            for (owner, _, _), run in self.by_key.items()
+            if owner == scope and run.state.value in ("queued", "running")
         )
 
 
@@ -115,5 +122,25 @@ def test_creazione_replay_conflitto_e_scope() -> None:
             await service.create(principal, conversation_id, profile_id, "Diverso", "key-1")
         with pytest.raises(NotFound):
             await service.get(other, first.id)
+
+    asyncio.run(scenario())
+
+
+def test_coda_piena_rifiuta_nuovi_run_ma_non_il_replay() -> None:
+    async def scenario() -> None:
+        principal = Principal(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), Role.OWNER)
+        conversation_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        store = FakeStore()
+        inline = FakeInline()
+        service = DurableRunService(store, inline, max_queue_depth=1)  # type: ignore[arg-type]
+
+        first = await service.create(principal, conversation_id, profile_id, "Ciao", "key-1")
+        assert first.state.value == "queued"
+        # Stessa chiave/payload: replay, non conta come nuovo run in coda.
+        replay = await service.create(principal, conversation_id, profile_id, "Ciao", "key-1")
+        assert replay.id == first.id
+        with pytest.raises(QueueFull):
+            await service.create(principal, conversation_id, profile_id, "Altro", "key-2")
 
     asyncio.run(scenario())

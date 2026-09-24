@@ -26,6 +26,8 @@ remota senza TLS, autenticazione e configurazione esplicita (§20.3).
 | `NEWRAY_DATABASE_STATEMENT_TIMEOUT_MS` | `10000` | Limite per ogni statement SQL |
 | `NEWRAY_DATABASE_LOCK_TIMEOUT_MS` | `3000` | Attesa lock, non superiore al limite statement |
 | `NEWRAY_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS` | `15000` | Termina sessioni con transazioni lasciate inattive |
+| `NEWRAY_RUNS_MAX_QUEUE_DEPTH` | `50` | Limite di coda per scope (organizzazione/proprietario), P-05. Valore iniziale dichiarato, non misurato: da tarare in P-19/P-20 |
+| `NEWRAY_RUN_MAX_DURATION_SECONDS` | `300` | Deadline complessiva di una generazione durevole (worker P-05). Valore iniziale dichiarato, non misurato |
 
 Il processo API condivide un unico pool fra i moduli. Tutti i limiti sono
 positivi e validati; zero non disabilita i timeout. Gli statement cancellati
@@ -79,6 +81,15 @@ non basta una porta aperta. Le migrazioni mancanti richiedono l'arresto di
 un'API preesistente. Ctrl-C termina soltanto i gruppi di processi creati dal
 launcher; PostgreSQL resta disponibile e persistente. Nessun bootstrap di
 identità viene eseguito automaticamente. Verifica di sola lettura:
+
+Il launcher avvia anche il worker dei run durevoli (`python -m
+newray.bootstrap.worker`, P-05), un solo processo per esecuzione: stesso
+ruolo applicativo dell'API (`newray_app`), nessuna porta HTTP propria. La
+sua readiness è la liveness registrata in `run_workers` (migrazione 0010),
+non una risposta HTTP; viene riusato se già attivo con un heartbeat recente
+e fermato da Ctrl-C come API/WebUI, lasciando terminare il run in corso
+entro l'arresto del processo. `deploy/compose.yaml` non lo avvia ancora:
+limite trasferito a P-18.
 
 ```sh
 curl -i http://127.0.0.1:5173/api/v1/me # 401 prima del bootstrap nella WebUI
