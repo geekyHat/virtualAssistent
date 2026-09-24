@@ -933,6 +933,45 @@ senza la relativa prova. Un manifest di avvio MCP specifica argv come array,
 runtime bloccato, riferimenti ai segreti e grant: niente comando shell libero
 costruito con testo ricevuto dal modello.
 
+### 11.5 Fiducia delle estensioni (bollini) e interoperabilità OpenClaw
+
+Decisione utente (24/09/2026). Skill, plugin e MCP si dividono in
+**preinstallati** (bundle curato del prodotto) e **installabili** da una
+lista. Ogni voce installabile porta un **bollino di fiducia**, assegnato
+**server-side** dalla verifica di firma/origine e dallo stato di analisi —
+mai dichiarato dal pacchetto stesso (§7: l'autorità è del server; un
+plugin non si auto-certifica):
+
+| Bollino | Significato | Autorizzazione all'installazione |
+| --- | --- | --- |
+| Verde | Fonte sicura/verificata (firma di una sorgente fidata) | L'utente accetta con un click |
+| Giallo | Fonte conosciuta ma pacchetto non ancora analizzato/sconosciuto | Finestra con spiegazione del rischio e doppia accettazione dell'utente |
+| Rosso | Fonte non sicura / pacchetto sconosciuto | Permesso e password di un amministratore |
+
+Il bollino governa il **livello di autorizzazione umana**, non se il gate
+tecnico gira: l'import inerte, le validazioni di §11.3 (tipo/schema, path
+traversal, symlink, decompressione, origine, digest, licenza,
+runtime/architettura, dipendenze/argv bloccati, permessi) e la
+verifica firma/pin restano **incondizionati** anche per il verde — fonte
+fidata non è prova che il codice sia sicuro (§10: "un registro non è
+certificazione di affidabilità"). Il bollino sposta solo l'attrito e il
+principal che autorizza (utente vs amministratore, §11 "installatore/admin
+distinto da utilizzatore").
+
+Interoperabilità **OpenClaw**: il layout di packaging è compatibile con
+OpenClaw — una cartella di import per tipo (§11.1, `imports/<kind>/`) dove
+ogni estensione è aggiunta come cartella, file o archivio (zip), con un
+**adapter dedicato per tipo** (skill, plugin, MCP) che mappa il formato
+esterno nelle feature native. Come per MCPB (§11.2), la compatibilità è un
+**importer che passa dal gate** NewRay (inerte → validazione → bollino →
+attivazione), non l'esecuzione diretta di bundle esterni né hot-reload
+aperto da un registry pubblico: nessuna compatibilità universale promessa
+(coerente con F-01). Un pacchetto OpenClaw non firmato/non riconosciuto
+entra al più come giallo o rosso, con l'autorizzazione relativa.
+
+Questa decisione è di scope F-01 (differito): qui è registrata come
+contratto di prodotto, non ancora implementata.
+
 <a id="rag"></a>
 ## 12. Documenti e RAG
 
@@ -1376,6 +1415,11 @@ Italiano completo, inglese tramite le stesse chiavi i18n. Date nella locale
 utente, fuso esplicito per appuntamenti. Layout desktop e schermi stretti,
 navigazione da tastiera, focus e feedback per tecnologie assistive. Non
 mostrare token/context window nella schermata ordinaria.
+
+Decisione utente (24/09/2026): le opzioni delle estensioni — MCP, plugin e
+skills, con i bollini di fiducia di §11.5 — vivono in un **pannello a
+sinistra**, distinto dalla lista conversazioni (pannello destro, P-04). È
+una modifica di layout futura (scope F-01), registrata qui come decisione.
 
 ### 18.4 Sviluppo e produzione
 

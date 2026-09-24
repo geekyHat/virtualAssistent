@@ -1131,6 +1131,17 @@ comunque offerto nella richiesta). File principali:
   nuovi run, rollback/revoca interrompono accessi futuri; no escalazione da UI/API,
   due principal, symlink escape e plugin ostile; onboarding ordinario invariato.
 - **Limiti:** nessun marketplace pubblico o compatibilità universale promessa.
+- **Decisione utente (24/09/2026), da realizzare qui:** bollini di fiducia
+  sulle estensioni installabili (verde = fonte sicura → 1 click utente; giallo
+  = fonte nota ma pacchetto non analizzato → finestra rischio + doppia
+  accettazione utente; rosso = fonte non sicura → permesso e password
+  amministratore), assegnati server-side dalla verifica firma/origine; il
+  bollino sposta solo l'autorizzazione umana, il gate tecnico di validazione
+  resta incondizionato. Interoperabilità OpenClaw come **importer/adapter per
+  tipo** (skill/plugin/MCP) su cartella di import con voci folder/file/zip,
+  che passa dal gate NewRay (non hot-reload aperto). Opzioni estensioni
+  (MCP/plugin/skills) in un pannello a sinistra. Contratto completo in
+  NewRay.md §11.5 e §18.3.
 
 ### F-02 — Provider cloud con autorizzazione separata all'esportazione
 
