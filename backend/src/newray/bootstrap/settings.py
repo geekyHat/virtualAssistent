@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     #: Deadline complessiva di una generazione durevole (P-05). Valore
     #: iniziale dichiarato, non misurato.
     run_max_duration_seconds: int = Field(default=300, ge=1, le=3_600)
+    #: Cadenza di poll di GET /runs/{id}/events (P-06). Valore iniziale
+    #: dichiarato (NewRay.md §19.3 non fissa numeri), nessun LISTEN/NOTIFY.
+    run_events_poll_seconds: float = Field(default=0.5, ge=0.05, le=10.0)
 
     @model_validator(mode="after")
     def _valida_budget_modello(self) -> Settings:

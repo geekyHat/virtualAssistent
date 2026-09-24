@@ -41,11 +41,63 @@ class DurableRun:
     lease_owner: uuid.UUID | None
     lease_until: datetime | None
     fence: int
+    cancel_requested_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "snapshot", freeze_json(self.snapshot))
+
+
+@dataclass(frozen=True, slots=True)
+class RunEvent:
+    """Voce del log/outbox degli eventi (NewRay.md §19.3, §7.4).
+
+    Appesa dalle stesse transazioni fencing-checked di claim/heartbeat/
+    finalize/reclaim (migrazione 0011): "terminale unico" eredita quella
+    barriera, non è verificato qui.
+    """
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    sequence: int
+    type: str
+    payload: Mapping[str, object]
+    occurred_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "payload", freeze_json(self.payload))
+
+
+@dataclass(frozen=True, slots=True)
+class EventPage:
+    """Pagina di eventi da un cursore, o segnale di risincronizzazione.
+
+    ``gap=True`` significa che eventi fra il cursore richiesto e il primo
+    restituito non esistono più (potati, §19.3 contro buffer illimitati):
+    il chiamante deve trattarlo come "cursore scaduto" e proporre uno
+    snapshot (``resync``), non fidarsi di ``events`` per riempire il buco.
+    """
+
+    events: tuple[RunEvent, ...]
+    gap: bool
+    #: Sequenza più alta esistente per il run (indipendente da ``events``,
+    #: che può essere vuoto): permette al chiamante di calcolare il cursore
+    #: dopo un ``resync`` senza una seconda interrogazione.
+    latest_sequence: int
+
+
+#: Tipi di evento minimi emessi in questo pilot (NewRay.md §19.3). I tipi
+#: legati a tool/fonti/approvazione (``run.waiting_approval``, ``tool.*``,
+#: ``sources.updated``, ``artifact.updated``) non sono emessi: nessun tool
+#: prima di P-07, nessuna fonte prima di P-11.
+EVENT_RUN_QUEUED = "run.queued"
+EVENT_RUN_STARTED = "run.started"
+EVENT_MESSAGE_DELTA = "message.delta"
+EVENT_RUN_COMPLETED = "run.completed"
+EVENT_RUN_FAILED = "run.failed"
+EVENT_RUN_CANCELLED = "run.cancelled"
+EVENT_RUN_INTERRUPTED = "run.interrupted"
 
 
 def freeze_json(value: object) -> object:
@@ -70,13 +122,15 @@ def thaw_json(value: object) -> object:
     return value
 
 
-#: Ragioni di terminazione esplicite (``finish_reason``). Il valore
-#: ``WORKER_LOST`` è scritto anche dalla funzione SQL
-#: ``newray_reclaim_stale_runs`` (migrazione 0010): deve restare identico.
+#: Ragioni di terminazione esplicite (``finish_reason``). ``WORKER_LOST`` è
+#: scritto anche da ``newray_reclaim_stale_runs`` (migrazione 0010) e
+#: ``CANCELLED_BY_USER`` anche da ``PostgresRunStore.request_cancel`` e
+#: dalla migrazione 0011: le stringhe devono restare identiche.
 FINISH_REASON_EMPTY_OUTPUT = "empty_output"
 FINISH_REASON_DEADLINE_EXCEEDED = "deadline_exceeded"
 FINISH_REASON_MODEL_ERROR = "model_error"
 FINISH_REASON_WORKER_LOST = "worker_lost"
+FINISH_REASON_CANCELLED_BY_USER = "cancelled_by_user"
 
 
 class RunStore(Protocol):
@@ -153,4 +207,39 @@ class RunStore(Protocol):
     def touch_worker(self, worker_id: uuid.UUID) -> None:
         """Rinnova la liveness del worker, anche se inattivo fra un claim
         e l'altro: distingue un worker idle da uno morto per il reclaim."""
+        ...
+
+    def list_events(self, scope: Scope, run_id: uuid.UUID, after_sequence: int) -> EventPage:
+        """Eventi con ``sequence > after_sequence``, scoped come ``get``.
+
+        ``EventPage.gap=True`` se eventi fra ``after_sequence`` e il primo
+        restituito sono stati potati (retention dei soli ``message.delta``,
+        migrazione 0011): il chiamante propone un ``resync``, non riprova
+        a colmare il buco.
+        """
+        ...
+
+    def request_cancel(self, scope: Scope, run_id: uuid.UUID) -> DurableRun | None:
+        """Cancellazione persistita e idempotente (P-06, NewRay.md §8.3).
+
+        Un run ``queued`` transita subito a ``cancelled`` (nessun worker lo
+        possiede ancora, nessun fencing necessario). Un run ``running``
+        riceve solo ``cancel_requested_at``: la transizione resta al
+        worker, fencing-checked come ogni altro finalize. Un run già
+        terminale non cambia stato (idempotente). ``None`` se il run non
+        esiste o è fuori scope.
+        """
+        ...
+
+    def find_active_by_conversation(
+        self, scope: Scope, conversation_id: uuid.UUID
+    ) -> DurableRun | None:
+        """Run non terminale più recente della conversazione, scoped (P-06).
+
+        Permette al client di ritrovare e riprendere lo stream di un run
+        già in corso senza già possederne l'id — una nuova scheda o un
+        refresh a metà generazione. ``None`` se non c'è alcun run
+        queued/running per quella conversazione nello scope del principal
+        (conversazione fuori scope inclusa: nessuna riga è visibile sotto
+        RLS, non un errore distinto)."""
         ...

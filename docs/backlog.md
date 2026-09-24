@@ -515,7 +515,7 @@ chiusura. File principali:
 
 ### P-06 — Eventi durevoli, stop e migrazione della chat browser
 
-- **Stato / priorità:** Da fare / P0.
+- **Stato / priorità:** Completato (24/09/2026) / P0.
 - **Proprietario:** runs/events; web/features/chat e conversations.
 - **Dipendenze:** P-04, P-05.
 - **Contratto e risultato:** `GET /runs/{id}/events`, snapshot e
@@ -536,6 +536,129 @@ chiusura. File principali:
   Kill worker e stop durante inference liberano risorse o rendono l'incertezza visibile.
 - **Limiti / recupero:** nessun retry automatico di invii incerti. Il roll-out
   preserva lo storico inline; rollback client non deve creare due run per invio.
+
+**Chiusura P-06 (24/09/2026).** Migrazione `0011_run_events_and_cancel`
+aggiunge la tabella `run_events` (outbox, RLS FORCE identica a `runs`,
+`UNIQUE(run_id, sequence)`), `runs.next_event_sequence` e
+`runs.cancel_requested_at`. Le quattro funzioni `SECURITY DEFINER` di P-05
+(`newray_claim_run`/`newray_heartbeat_run`/`newray_finalize_run`/
+`newray_reclaim_stale_runs`, ADR 0007) sono aggiornate per appendere
+`run.started`/`message.delta`/`run.<stato>` nella STESSA transazione
+fencing-checked della UPDATE: "terminale unico" resta ereditato da quella
+barriera, non da una regola applicativa separata da provare a parte.
+`newray_heartbeat_run` pota i `message.delta` oltre gli ultimi
+`MAX_RETAINED_DELTA_EVENTS=50` (valore iniziale dichiarato, non tarato —
+P-19/P-20); gli eventi di ciclo vita (al più 5 per run) non sono mai
+potati. Un cursore più vecchio del delta più vecchio rimasto riceve un
+singolo evento `resync` con lo snapshot corrente, mai un buco silenzioso
+(NewRay.md §19.3).
+
+Cancellazione (`RunStore.request_cancel`): un run `queued` transita subito
+a `cancelled` (nessun worker lo possiede ancora, nessun fencing
+necessario); un run `running` riceve solo `cancel_requested_at` — la
+transizione resta al worker, che la legge dopo ogni heartbeat riuscito e
+chiude cooperativamente lo stream con `finish_reason=cancelled_by_user`,
+preservando il parziale (mai un kill forzato). `POST /api/v1/runs/{id}/cancel`
+è idempotente: un run già terminale non cambia stato, la risposta riflette
+lo stato reale.
+
+`GET /api/v1/runs/{id}/events` è una SSE con replay/cursore/poll (stesso
+pattern di polling di P-05, nessun LISTEN/NOTIFY): verifica lo scope prima
+di aprire lo stream, poi replay/poll con ri-validazione periodica della
+sessione — "la connessione non prolunga i grant" (§19.3) — fino a un
+singolo evento terminale, poi chiusura pulita.
+
+**Migrazione frontend completa, un solo motore.** `useChat.ts` è
+riscritto per il percorso `POST .../runs` → `GET .../events` → `POST
+.../cancel`, sostituendo l'inline route come UNICO percorso chiamato dal
+composer. Nuovo `runEventsReducer.ts` (dedup per sequence, gap→`desync`,
+resync che riallinea la baseline) al posto di `streamReducer.ts` (che
+resta, non più usato dalla UI, per il contratto inline preservato).
+`SseDecoder` esteso per leggere `id:` (cursore). Scrivere i test del
+reducer prima di collegarlo ha trovato e corretto due bug reali, non solo
+confermato il comportamento atteso: un `run.failed` con `finish_reason`
+diverso da quelli riconosciuti (`model_error`/`deadline_exceeded`) veniva
+classificato `empty`/`completed` invece di `failed` (mancava un hint dal
+tipo di evento, non solo dal `finish_reason`); un `resync` con stato
+terminale leggeva `payload.text` invece di `payload.partial_text`, perdendo
+il testo dello snapshot. `chat-sse.spec.ts` (14 scenari SSE sull'inline
+route) è `test.describe.skip`, documentato nel file: guidare "Invia" non
+intercetta più quella route, quegli scenari non provano più un comportamento
+reale del browser; `run-events.spec.ts` (nuovo, 14 test) porta la stessa
+copertura sul percorso durevole più gli scenari propri di P-06 (reconnessione
+dopo EOF, resync su cursore scaduto simulato, terminale duplicato, evento
+senza `id:`). `workspace.spec.ts` (race cambio-conversazione/logout-durante-run)
+migrato alle nuove route.
+
+**Resume (due tab/refresh) aggiunto durante questa chiusura.** I criteri di
+accettazione del ticket includono esplicitamente "due tab" e "refresh
+riprende parziale": nella prima stesura della migrazione frontend questo
+non era coperto — non esisteva alcun modo per il client di scoprire il run
+attivo di una conversazione senza già possederne l'id, un vero scarto dai
+criteri del ticket, non un limite dichiarato in anticipo. Aggiunto
+`RunStore.find_active_by_conversation` (porta+adapter, RLS scoped, run
+`queued`/`running` più recente per conversazione) e
+`GET /api/v1/conversations/{id}/active-run` (`RunDTO | null`, mai 404 per
+"fuori scope": RLS non fa emergere righe che il principal non può vedere,
+stesso `null` di "nessun run attivo"). `useChat` guadagna un effect di
+resume: al mount/cambio conversazione interroga l'endpoint e, se trova un
+run non terminale, riprende lo stream dalla sequenza 0 (replay completo),
+senza dipendere da `streamOwnerId` nel proprio array di dipendenze (che
+cambierebbe per effetto dello stesso adottamento, causando un
+riavvio/abort di sé stesso) — la guardia contro una `send()` concorrente è
+`abortRef` (un ref, sempre aggiornato), non lo stato chiuso nella closure
+dell'effect. Provato con due test e2e dedicati che seminano un run
+direttamente nel registro del mock (mai attraverso il composer di questa
+pagina, per rappresentare un'altra scheda) e poi navigano fresh sulla
+conversazione.
+
+Prove reali (PostgreSQL 16 + pgvector 0.6.0 nativi, stessi ruoli di P-05;
+nessun Ollama/GPU, worker provato con `EchoChatModel`/fake). `pytest
+tests/unit tests/contracts tests/integration` da `backend/`: **418
+passed**, 2 warning di terze parti. Nuovi: `test_run_events_integration.py`
+(4, PostgreSQL reale — sequenza monotona isolata per scope, retention dei
+delta con resync su cursore scaduto, cancel `queued` diretta, cancel
+`running` propagata dal worker reale con `ChatModel` fake lento e un gate
+temporale sull'heartbeat), `test_http_run_events.py` (11, contratto —
+replay completo/parziale, resync, 404 fuori scope, cancel idempotente, e i
+4 su `active-run`), `test_rls_runs.py` esteso con una prova RLS reale di
+`find_active_by_conversation` (nessun run, trovato in coda/in esecuzione,
+fuori scope → `None` senza errore distinto, terminale → `None`).
+`ruff check`/`ruff format --check` (src e tests), `mypy src` (74
+sorgenti), `scripts/check_architecture.py` (74 file) e
+`scripts/generate_contracts.py --check`: verdi. `web`: `npm run check`
+(format/lint/typecheck/**85 Vitest**/licenze/build/bundle 465,7 KB JS —
+26,2 KB CSS): verde. `npx playwright test --project=ui`: **55 passed, 7
+skipped** (62 totali; l'eseguibile Chromium disponibile nell'ambiente,
+revisione 1194, è stato puntato via una modifica locale **non commessa** a
+`playwright.config.ts`, verificata e poi ripristinata — la revisione
+richiesta dal pacchetto, 1243, non è installata qui, stesso limite già
+osservato in P-05; `npm run e2e` di default resta quindi non eseguibile in
+questo ambiente senza quella stessa modifica locale). Durante questo
+lavoro una race era genuinamente presente in un TEST (non nell'hook): la
+conversazione appena creata aveva un proprio resume-check in corso quando
+il run veniva seminato subito dopo nello stesso test — risolta navigando
+via prima di seminare il run, non aggirata; 4 esecuzioni consecutive di
+`run-events.spec.ts` da solo dopo la correzione: 14/14 verdi ogni volta.
+`NEWRAY_LIVE_START_TEST=1 scripts/tests/test_start_local.py`: **8/8
+passed**, incluse le migrazioni fino alla 0011.
+
+**Limiti espliciti.** Poll invece di LISTEN/NOTIFY (stessa scelta
+dichiarata di P-05); retention dei delta (50) e intervallo di poll (0.5s)
+sono valori iniziali dichiarati, non misurati — P-19/P-20 li tara.
+Riconnessione client a un solo tentativo, non un backoff generale. Nessun
+tool/fonte/approvazione: `tool.*`/`sources.updated`/`artifact.updated`
+restano non emessi (P-07/P-11/P-15), come già dichiarato dal ticket.
+Nessuna prova con Ollama/GPU reale: resta P-18/P-20. `chat-sse.spec.ts`
+resta nel repository come documentazione degli scenari originali ma non
+esercita più un percorso reale della UI; il contratto HTTP della route
+inline resta provato lato backend (`test_http_chat_run.py`), non
+dall'e2e. File principali:
+`backend/migrations/versions/0011_run_events_and_cancel.py`,
+`backend/src/newray/modules/runs/{durable.py,durable_application.py,worker.py,adapters/postgres.py}`,
+`backend/src/newray/interfaces/http/routes/runs.py`,
+`web/src/features/chat/{useChat.ts,runEventsReducer.ts}`,
+`web/src/shared/api/sse.ts`, `web/e2e/{fixtures.ts,ui/run-events.spec.ts}`.
 
 ### P-07 — Gateway e ciclo tool sullo stesso Gemma
 

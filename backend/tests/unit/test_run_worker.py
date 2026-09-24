@@ -28,6 +28,7 @@ from newray.modules.models import (
     StreamEvent,
 )
 from newray.modules.runs import (
+    FINISH_REASON_CANCELLED_BY_USER,
     FINISH_REASON_DEADLINE_EXCEEDED,
     FINISH_REASON_EMPTY_OUTPUT,
     FINISH_REASON_MODEL_ERROR,
@@ -77,6 +78,7 @@ def _queued_run(
         eval_duration_ns=None,
         lease_owner=None,
         lease_until=None,
+        cancel_requested_at=None,
         fence=0,
         created_at=now,
         updated_at=now,
@@ -278,5 +280,59 @@ def test_fencing_perso_non_scrive_stato_ne_messaggi() -> None:
         # fencing (il worker non scrive nulla dopo aver perso la lease).
         assert current.state is RunState.RUNNING
         assert conversations.list_messages(principal, conversation_id) == []
+
+    asyncio.run(scenario())
+
+
+def test_cancel_durante_generazione_finalizza_cancelled_senza_messaggio() -> None:
+    """§8.3: stop propagato dal worker, parziale preservato, mai un messaggio."""
+
+    async def scenario() -> None:
+        principal = Principal(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), Role.OWNER)
+        conversations, conversation_id = _conversations_with_conversation(principal)
+        store = InMemoryRunStore()
+        run = _queued_run(store, conversation_id, principal.organization_id, principal.user_id)
+        chat_model = _ScriptedChatModel(
+            [
+                ContentDelta(text="prima della richiesta di stop"),
+                0.1,
+                ContentDelta(text="mai visto"),
+                Completion(finish_reason="stop", prompt_tokens=1, completion_tokens=1),
+            ]
+        )
+        worker = RunWorker(
+            store, conversations, chat_model, lease_seconds=1, heartbeat_interval_seconds=0.02
+        )
+
+        task = asyncio.create_task(worker._claim_and_execute())
+        await asyncio.sleep(0.03)
+        cancelled = store.request_cancel(principal.scope, run.id)
+        assert cancelled is not None and cancelled.state is RunState.RUNNING
+        await task
+
+        finalized = store.get(principal.scope, run.id)
+        assert finalized is not None
+        assert finalized.state is RunState.CANCELLED
+        assert finalized.finish_reason == FINISH_REASON_CANCELLED_BY_USER
+        assert finalized.partial_text == "prima della richiesta di stop"
+        assert conversations.list_messages(principal, conversation_id) == []
+
+    asyncio.run(scenario())
+
+
+def test_cancel_su_run_queued_transita_subito_senza_worker() -> None:
+    async def scenario() -> None:
+        principal = Principal(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), Role.OWNER)
+        conversations, conversation_id = _conversations_with_conversation(principal)
+        store = InMemoryRunStore()
+        run = _queued_run(store, conversation_id, principal.organization_id, principal.user_id)
+
+        cancelled = store.request_cancel(principal.scope, run.id)
+
+        assert cancelled is not None
+        assert cancelled.state is RunState.CANCELLED
+        assert cancelled.finish_reason == FINISH_REASON_CANCELLED_BY_USER
+        page = store.list_events(principal.scope, run.id, 0)
+        assert [event.type for event in page.events] == ["run.queued", "run.cancelled"]
 
     asyncio.run(scenario())

@@ -87,7 +87,12 @@ Superficie attuale (NewRay.md §19.2):
 | `DELETE /api/v1/conversations/{id}` | Cancellazione fisica con i messaggi (cascata); 204 |
 | `GET /api/v1/conversations/{id}/messages` | Messaggi in ordine di sequenza da `after_sequence`; `next_sequence` |
 | `POST /api/v1/conversations/{id}/messages` | Messaggio dell'utente (contenuto 1–50 000); ruolo e sequenza decisi dal server; 201 |
-| `POST /api/v1/conversations/{id}/run` | Preview SSE transitoria e deprecata: binding validato, budget esplicito, stream del modello del profilo e coppia user/assistant atomica; `Idempotency-Key` opzionale. B-04–B-07 la sostituiranno con run durevoli |
+| `POST /api/v1/conversations/{id}/run` | Preview SSE inline: **non più chiamata dalla WebUI** dalla chiusura P-06 (route/contratto preservati per compatibilità, mai per funzionalità nuova); binding validato, budget esplicito, stream del modello del profilo e coppia user/assistant atomica; `Idempotency-Key` opzionale |
+| `POST /api/v1/conversations/{id}/runs` | Crea un run durevole idempotente (`idempotency_key` obbligatoria); il worker lo consuma in background (P-05); 201 con lo snapshot pubblico |
+| `GET /api/v1/conversations/{id}/active-run` | Run non terminale più recente della conversazione, o `null` (P-06): permette a una scheda nuova o a un refresh di ritrovare e riprendere un run in corso senza già possederne l'id |
+| `GET /api/v1/runs/{id}` | Snapshot pubblico del run; 404 fuori scope |
+| `POST /api/v1/runs/{id}/cancel` | Cancellazione persistita e idempotente (P-06): un run `queued` transita subito, un run `running` la vede propagata dal worker al prossimo heartbeat |
+| `GET /api/v1/runs/{id}/events` | Eventi durevoli in SSE con replay/cursore (`after_sequence`) e `resync` su cursore scaduto (P-06); poll interno, nessun LISTEN/NOTIFY |
 | `GET /api/v1/profiles` | Lettura senza effetti dei profili propri; conserva anche gli specialisti storici, `model: null` se il binding non è disponibile |
 | `POST /api/v1/profiles/defaults` | Provisioning esplicito e idempotente del solo Assistente; 200 con profilo corrente, nessun download dei pesi |
 | `GET /api/v1/models` | Modelli del runtime, dallo stato della macchina (catalogo onesto, §9.1: vuoto senza Ollama collegato; runtime irraggiungibile → vuoto; timeout → 504 `INFERENCE_TIMEOUT`) |
@@ -146,6 +151,70 @@ sono validati dai settings.
 
 psycopg è LGPL-2.1 (scelta di base NewRay.md §4.2): compatibile con l'uso
 previsto; la licenza del progetto resta da decidere prima della pubblicazione.
+
+## Comandi verificati (24 settembre 2026, chiusura P-06)
+
+Ambiente: PostgreSQL 16 + pgvector 0.6.0 nativi (cluster `127.0.0.1:5432`,
+ruoli `newray_migrate`/`newray_app`/`newray_scheduler` da
+`backend/scripts/db/bootstrap.sql`). Nessun Ollama/GPU: worker provato con
+`EchoChatModel`/fake, la stessa scelta di P-05.
+
+- `.venv/bin/python -m pytest -q tests/unit tests/contracts tests/integration`
+  da `backend/`: **418 passed**, 2 warning di terze parti. Include
+  `test_run_events_integration.py` (4, PostgreSQL reale: sequenza monotona
+  isolata per scope, retention dei delta con `resync` su cursore scaduto,
+  cancel `queued`→transizione diretta, cancel `running`→propagato dal
+  worker reale con `ChatModel` fake lento e gate temporale sull'heartbeat),
+  `test_http_run_events.py` (11, contratto: replay completo/parziale,
+  resync, 404 fuori scope, cancel idempotente, più i 4 nuovi su
+  `GET /conversations/{id}/active-run`: nessun run, run in coda/in
+  esecuzione, run terminale non più ripresentato, conversazione fuori
+  scope → `null` non 404), `test_rls_runs.py` esteso con
+  `test_run_attivo_per_conversazione_scoped_e_solo_non_terminale`
+  (PostgreSQL reale: nessun run→`None`, trovato in coda e in esecuzione,
+  fuori scope→`None` senza errore distinto sotto RLS, terminale→`None`).
+- `.venv/bin/ruff check src tests`, `.venv/bin/ruff format --check src
+  tests`, `.venv/bin/mypy src` (74 sorgenti): verdi.
+- `python scripts/check_architecture.py` (dal root): 74 file verificati, verde.
+- `python scripts/generate_contracts.py --check` (dal root): nessun drift
+  dopo la rigenerazione che ha aggiunto `active-run`/eventi/cancel a
+  `contracts/openapi.json` e `web/src/shared/contracts/api.d.ts`.
+- `web`: `npm run check` (format/lint/typecheck/**85 Vitest**/licenze 640
+  pacchetti/build/bundle 465,7 KB JS – 26,2 KB CSS): verde. Vitest nuovi:
+  `runEventsReducer.test.ts` (17: dedup per sequence, buco→`desync`,
+  resync riallinea baseline e testo, terminale unico su replay/riconnessione,
+  `run.failed`/`run.cancelled`/`run.interrupted` mappati per tipo evento non
+  per solo `finish_reason` — due bug reali trovati e corretti scrivendo
+  questi test, non solo confermati), `sse.test.ts` esteso per `id:` (14).
+- `npx playwright test --project=ui` (`web/e2e`): **55 passed, 7 skipped**
+  (62 totali) con l'eseguibile Chromium disponibile nell'ambiente
+  (`/opt/pw-browsers/chromium`, revisione 1194) puntato via
+  `launchOptions.executablePath` **non commesso** — modifica locale a
+  `playwright.config.ts`, verificata e poi ripristinata all'originale
+  prima del commit (`git diff` pulito), perché la revisione richiesta dal
+  pacchetto (1243) non è installata in questo ambiente di sviluppo,
+  stesso limite già osservato in P-05; il comando di default `npm run
+  e2e` resta quindi non eseguibile qui senza quella stessa modifica
+  locale. `chat-sse.spec.ts` (14 scenari della route inline) è
+  `test.describe.skip`, documentato nel file: quella route non è più
+  raggiunta dalla WebUI, guidare "Invia" non intercetta più nulla — gli
+  stessi scenari (terminali distinti, `error` dopo delta, EOF senza
+  terminale, stop) sono riportati su `run-events.spec.ts` (14 test, inclusi
+  2 di resume) sul percorso realmente usato; `workspace.spec.ts` (race
+  cambio-conversazione/logout-durante-run) migrato alle nuove route.
+  4 esecuzioni consecutive di `run-events.spec.ts` da solo: 14/14 verdi
+  ogni volta; una singola race trovata e corretta durante questo lavoro
+  era nel TEST (la conversazione appena creata aveva un proprio
+  resume-check in corso quando il run veniva seminato subito dopo — non un
+  difetto dell'hook, risolto navigando via prima di seminare il run).
+  Un fallimento isolato di `navigation.spec.ts` (non toccato da questa
+  chiusura) durante UNA delle esecuzioni della suite completa non si è
+  ripetuto in isolamento né nelle esecuzioni successive: flakiness
+  preesistente dell'ambiente, non una regressione di questa chiusura.
+- `NEWRAY_LIVE_START_TEST=1 backend/.venv/bin/python
+  scripts/tests/test_start_local.py` (utente non privilegiato, PostgreSQL/
+  pgvector nativi, nessun Ollama): **8/8 passed**, incluse le migrazioni
+  fino alla 0011 e l'avvio/arresto puliti del worker.
 
 ## Comandi verificati (24 settembre 2026, chiusura P-05)
 

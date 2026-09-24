@@ -5,7 +5,7 @@ describe("SseDecoder", () => {
   it("emette un frame completo da un solo chunk", () => {
     const decoder = new SseDecoder();
     const frames = decoder.push('event: delta\ndata: {"text":"ciao"}\n\n');
-    expect(frames).toEqual([{ event: "delta", data: '{"text":"ciao"}' }]);
+    expect(frames).toEqual([{ event: "delta", data: '{"text":"ciao"}', id: null }]);
   });
 
   it("emette più frame separati da \\n\\n nello stesso chunk", () => {
@@ -23,20 +23,20 @@ describe("SseDecoder", () => {
     expect(decoder.push("event: del")).toEqual([]);
     expect(decoder.push('ta\ndata: {"text":"')).toEqual([]);
     const frames = decoder.push('parziale"}\n\n');
-    expect(frames).toEqual([{ event: "delta", data: '{"text":"parziale"}' }]);
+    expect(frames).toEqual([{ event: "delta", data: '{"text":"parziale"}', id: null }]);
   });
 
   it("ricompone una riga data spezzata a metà di un chunk", () => {
     const decoder = new SseDecoder();
     expect(decoder.push("data: {")).toEqual([]);
     const frames = decoder.push('"text":"x"}\n\n');
-    expect(frames).toEqual([{ event: "message", data: '{"text":"x"}' }]);
+    expect(frames).toEqual([{ event: "message", data: '{"text":"x"}', id: null }]);
   });
 
   it("giunta le righe data multilinea con \\n", () => {
     const decoder = new SseDecoder();
     const frames = decoder.push("data: prima\ndata: seconda\n\n");
-    expect(frames).toEqual([{ event: "message", data: "prima\nseconda" }]);
+    expect(frames).toEqual([{ event: "message", data: "prima\nseconda", id: null }]);
   });
 
   it("default event a message quando la riga event è assente", () => {
@@ -48,7 +48,7 @@ describe("SseDecoder", () => {
   it("ignora commenti e righe retry", () => {
     const decoder = new SseDecoder();
     const frames = decoder.push(": commento\nretry: 3000\nevent: done\ndata: {}\n\n");
-    expect(frames).toEqual([{ event: "done", data: "{}" }]);
+    expect(frames).toEqual([{ event: "done", data: "{}", id: null }]);
   });
 
   it("finish() non emette un frame a metà e non duplica i frame già emessi", () => {
@@ -80,7 +80,9 @@ describe("SseDecoder", () => {
         ...decoder.push(body.slice(split)),
         ...decoder.finish(),
       ];
-      expect(frames, `split=${split}`).toEqual([{ event: "delta", data: '{"text":"x"}' }]);
+      expect(frames, `split=${split}`).toEqual([
+        { event: "delta", data: '{"text":"x"}', id: null },
+      ]);
     }
   });
 
@@ -89,6 +91,20 @@ describe("SseDecoder", () => {
     expect(decoder.push("event: done\r")).toEqual([]);
     expect(decoder.push('\ndata: {"finish_reason":"stop"}\r')).toEqual([]);
     expect(decoder.push("\n\r")).toEqual([]);
-    expect(decoder.push("\n")).toEqual([{ event: "done", data: '{"finish_reason":"stop"}' }]);
+    expect(decoder.push("\n")).toEqual([
+      { event: "done", data: '{"finish_reason":"stop"}', id: null },
+    ]);
+  });
+
+  it("legge il campo id: come cursore intero (P-06)", () => {
+    const decoder = new SseDecoder();
+    const frames = decoder.push('id: 12\nevent: message.delta\ndata: {"text":"a"}\n\n');
+    expect(frames).toEqual([{ event: "message.delta", data: '{"text":"a"}', id: 12 }]);
+  });
+
+  it("id: non numerico o assente resta null, non solleva", () => {
+    const decoder = new SseDecoder();
+    const frames = decoder.push("id: not-a-number\nevent: message.delta\ndata: {}\n\n");
+    expect(frames[0].id).toBeNull();
   });
 });

@@ -65,10 +65,39 @@ export type RunScenario =
   | { kind: "error"; status: number; message: string }
   | { kind: "sse"; body: string };
 
+/**
+ * Scenari del run durevole (P-06, NewRay.md §19.3): `echo` costruisce la
+ * sequenza `run.queued → run.started → message.delta* → run.completed`
+ * come il vecchio `run: {kind:"echo"}`, ma sul nuovo contratto a eventi
+ * sequenziati. `events` dà controllo esplicito sulla sequenza (terminale
+ * duplicato, cancellazione, fallimento); `disconnectAfterSequence` tronca
+ * la PRIMA risposta a quella sequenza (nessun terminale) per provare la
+ * riconnessione con un solo tentativo già cablata nell'hook; se abbinato
+ * a `resyncOnReconnect`, la riconnessione riceve un `resync` invece del
+ * proseguimento — prova il comportamento CLIENT su un cursore scaduto,
+ * non la potatura reale lato server (quella è provata nei test di
+ * integrazione PostgreSQL del backend). `events-raw` serve un corpo SSE
+ * arbitrario, per un EOF senza terminale o framing malformato.
+ */
+export type DurableEvent = { type: string; payload: Record<string, unknown> };
+
+export type DurableRunScenario =
+  | { kind: "echo" }
+  | { kind: "create-error"; status: number; message: string }
+  | {
+      kind: "events";
+      events: DurableEvent[];
+      disconnectAfterSequence?: number;
+      resyncOnReconnect?: { snapshot: Record<string, unknown>; latestSequence: number };
+    }
+  | { kind: "events-raw"; body: string };
+
 export type ChatScenario = {
   conversations: FakeConversation[];
   messages: Record<string, FakeMessage[]>;
   profiles: FakeProfile[];
+  /** Scenario del percorso durevole (P-06); default `{kind:"echo"}`. */
+  durableRun?: DurableRunScenario;
   models?: {
     name: string;
     runtime: string;
@@ -151,6 +180,7 @@ export const defaultChatScenario: ChatScenario = {
   messages: {},
   profiles: [defaultProfile],
   run: { kind: "echo" },
+  durableRun: { kind: "echo" },
 };
 
 export const defaultScenario: SessionScenario = {
@@ -165,6 +195,13 @@ export const defaultScenario: SessionScenario = {
 type SessionController = {
   set(patch: Partial<SessionScenario>): void;
   snapshot(): SessionScenario;
+  /**
+   * Crea un run direttamente nel registro del mock, come farebbe un'altra
+   * scheda (o l'invio precedente a un refresh): a differenza di
+   * `chat.send`, questa scheda non ha alcuna conoscenza locale del run,
+   * solo `GET .../active-run` può farglielo scoprire (P-06 resume).
+   */
+  seedActiveRun(conversationId: string, content: string): string;
 };
 
 function errorPayload(
@@ -587,6 +624,259 @@ async function fulfillRun(route: Route, scenario: SessionScenario) {
   });
 }
 
+type DurableRunRecord = {
+  conversationId: string;
+  content: string;
+  scenario: DurableRunScenario;
+  eventsCallCount: number;
+  /** Un terminale è già stato servito da `/events`: non più "da riprendere". */
+  terminalObserved: boolean;
+};
+
+const TERMINAL_EVENT_TYPES = new Set([
+  "run.completed",
+  "run.failed",
+  "run.cancelled",
+  "run.interrupted",
+]);
+const TERMINAL_RUN_STATES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+let nextRunSeq = 0;
+const durableRuns = new Map<string, DurableRunRecord>();
+
+function durableSseFrame(event: string, payload: Record<string, unknown>, id: number): string {
+  return `id: ${id}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+function echoEntries(content: string): DurableEvent[] {
+  const reply = `Echo: ${content}`;
+  const words = reply.split(" ");
+  const entries: DurableEvent[] = [
+    { type: "run.queued", payload: {} },
+    { type: "run.started", payload: {} },
+  ];
+  let acc = "";
+  for (let i = 0; i < words.length; i++) {
+    acc += i === 0 ? words[i] : ` ${words[i]}`;
+    entries.push({ type: "message.delta", payload: { text: acc } });
+  }
+  entries.push({
+    type: "run.completed",
+    payload: {
+      finish_reason: "stop",
+      text: acc,
+      prompt_tokens: 10,
+      completion_tokens: 20,
+      // completion_tokens / (eval_duration_ns / 1e9) = 42.5 token/s, stesso
+      // valore del vecchio fixture `done` (regressione confrontabile).
+      eval_duration_ns: 470_588_235,
+    },
+  });
+  return entries;
+}
+
+/**
+ * Molti scenari (non specifici al contratto SSE) impostano solo `run` per
+ * esprimere l'intento ("errore dal modello", "echo"): tradotto in un
+ * `durableRun` equivalente quando non impostato esplicitamente, così quei
+ * test restano validi senza doverli riscrivere uno a uno. Un `run:{kind:
+ * "sse", body}` non si traduce (framing specifico del contratto inline
+ * preservato): resta `echo`, che è lo scenario esplicito di `chat-sse.spec.ts`.
+ */
+function deriveDurableRun(run: RunScenario): DurableRunScenario {
+  if (run.kind === "error")
+    return { kind: "create-error", status: run.status, message: run.message };
+  return { kind: "echo" };
+}
+
+async function fulfillCreateRun(route: Route, scenario: SessionScenario) {
+  const durable = scenario.chat.durableRun ?? deriveDurableRun(scenario.chat.run);
+
+  if (durable.kind === "create-error") {
+    return route.fulfill({
+      status: durable.status,
+      contentType: "application/json",
+      body: JSON.stringify(errorPayload("RUN_ERROR", durable.message)),
+    });
+  }
+
+  const body = JSON.parse(route.request().postData() ?? "{}");
+  const convId =
+    route
+      .request()
+      .url()
+      .match(/\/conversations\/([^/?]+)\/runs/)?.[1] ?? "";
+  const runId = `run_${++nextRunSeq}`;
+  durableRuns.set(runId, {
+    conversationId: convId,
+    content: body.content ?? "",
+    scenario: durable,
+    eventsCallCount: 0,
+    terminalObserved: false,
+  });
+  const now = new Date().toISOString();
+  return route.fulfill({
+    status: 201,
+    contentType: "application/json",
+    body: JSON.stringify({
+      id: runId,
+      conversation_id: convId,
+      state: "queued",
+      partial_text: "",
+      finish_reason: null,
+      prompt_tokens: null,
+      completion_tokens: null,
+      eval_duration_ns: null,
+      created_at: now,
+      updated_at: now,
+    }),
+  });
+}
+
+async function fulfillRunEvents(route: Route, scenario: SessionScenario) {
+  const url = new URL(route.request().url());
+  const runId = url.pathname.match(/\/runs\/([^/]+)\/events/)?.[1] ?? "";
+  const afterSequence = Number(url.searchParams.get("after_sequence") ?? 0);
+  const record = durableRuns.get(runId);
+  if (!record) {
+    return route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify(errorPayload("NOT_FOUND", "run non trovato")),
+    });
+  }
+  record.eventsCallCount += 1;
+  const durable = record.scenario;
+
+  if (durable.kind === "events-raw") {
+    return route.fulfill({ status: 200, contentType: "text/event-stream", body: durable.body });
+  }
+  if (durable.kind === "create-error") {
+    // Nessun run è mai creato per questo scenario (fulfillCreateRun
+    // risponde con l'errore prima): ramo irraggiungibile, solo per la
+    // narrowing del tipo dell'unione discriminata sotto.
+    return route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
+  }
+
+  if (durable.kind === "echo" && record.eventsCallCount === 1) {
+    // Stesso comportamento del vecchio fulfillRun: persiste i messaggi
+    // così la lista si aggiorna dopo l'invalidazione post-`send`.
+    const msgs = scenario.chat.messages[record.conversationId] ?? [];
+    const now = new Date().toISOString();
+    msgs.push({
+      id: `msg_${msgs.length + 1}`,
+      role: "user",
+      content: record.content,
+      sequence: msgs.length + 1,
+      created_at: now,
+    });
+    msgs.push({
+      id: `msg_${msgs.length + 1}`,
+      role: "assistant",
+      content: `Echo: ${record.content}`,
+      sequence: msgs.length + 1,
+      created_at: now,
+    });
+    scenario.chat.messages[record.conversationId] = msgs;
+  }
+
+  const rawEntries: DurableEvent[] =
+    durable.kind === "echo" ? echoEntries(record.content) : durable.events;
+
+  if (
+    durable.kind === "events" &&
+    durable.disconnectAfterSequence !== undefined &&
+    record.eventsCallCount === 1
+  ) {
+    const truncated = rawEntries.slice(0, durable.disconnectAfterSequence);
+    const body = truncated.map((e, i) => durableSseFrame(e.type, e.payload, i + 1)).join("");
+    return route.fulfill({ status: 200, contentType: "text/event-stream", body });
+  }
+
+  if (
+    durable.kind === "events" &&
+    durable.disconnectAfterSequence !== undefined &&
+    durable.resyncOnReconnect !== undefined &&
+    record.eventsCallCount >= 2
+  ) {
+    const { snapshot, latestSequence } = durable.resyncOnReconnect;
+    const state = typeof snapshot.state === "string" ? snapshot.state : "";
+    if (TERMINAL_RUN_STATES.has(state)) record.terminalObserved = true;
+    return route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: durableSseFrame("resync", snapshot, latestSequence),
+    });
+  }
+
+  const filtered = rawEntries
+    .map((entry, i) => ({ ...entry, sequence: i + 1 }))
+    .filter((entry) => entry.sequence > afterSequence);
+  if (filtered.some((entry) => TERMINAL_EVENT_TYPES.has(entry.type))) {
+    record.terminalObserved = true;
+  }
+  const body = filtered
+    .map((entry) => durableSseFrame(entry.type, entry.payload, entry.sequence))
+    .join("");
+  return route.fulfill({ status: 200, contentType: "text/event-stream", body });
+}
+
+async function fulfillActiveRun(route: Route) {
+  const convId =
+    new URL(route.request().url()).pathname.match(/\/conversations\/([^/]+)\/active-run/)?.[1] ??
+    "";
+  let runId: string | null = null;
+  for (const [id, record] of durableRuns) {
+    if (record.conversationId === convId && !record.terminalObserved) runId = id;
+  }
+  if (runId === null) {
+    return route.fulfill({ status: 200, contentType: "application/json", body: "null" });
+  }
+  const now = new Date().toISOString();
+  return route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      id: runId,
+      conversation_id: convId,
+      state: "running",
+      partial_text: "",
+      finish_reason: null,
+      prompt_tokens: null,
+      completion_tokens: null,
+      eval_duration_ns: null,
+      created_at: now,
+      updated_at: now,
+    }),
+  });
+}
+
+async function fulfillCancelRun(route: Route) {
+  const runId =
+    route
+      .request()
+      .url()
+      .match(/\/runs\/([^/]+)\/cancel/)?.[1] ?? "";
+  const record = durableRuns.get(runId);
+  const now = new Date().toISOString();
+  return route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      id: runId,
+      conversation_id: record?.conversationId ?? "",
+      state: "cancelled",
+      partial_text: "",
+      finish_reason: "cancelled_by_user",
+      prompt_tokens: null,
+      completion_tokens: null,
+      eval_duration_ns: null,
+      created_at: now,
+      updated_at: now,
+    }),
+  });
+}
+
 export const test = base.extend<{ session: SessionController }>({
   session: async ({ context }, use) => {
     let current: SessionScenario = structuredClone(defaultScenario);
@@ -610,6 +900,13 @@ export const test = base.extend<{ session: SessionController }>({
       fulfillProfileVersion(route, current)
     );
     await context.route("**/api/v1/conversations/*/run", (route) => fulfillRun(route, current));
+    await context.route("**/api/v1/conversations/*/runs", (route) => {
+      if (route.request().method() === "POST") return fulfillCreateRun(route, current);
+      return route.continue();
+    });
+    await context.route("**/api/v1/runs/*/events*", (route) => fulfillRunEvents(route, current));
+    await context.route("**/api/v1/runs/*/cancel", (route) => fulfillCancelRun(route));
+    await context.route("**/api/v1/conversations/*/active-run", (route) => fulfillActiveRun(route));
     await context.route("**/api/v1/conversations/*/messages*", (route) =>
       fulfillMessages(route, current)
     );
@@ -622,6 +919,17 @@ export const test = base.extend<{ session: SessionController }>({
       },
       snapshot() {
         return current;
+      },
+      seedActiveRun(conversationId, content) {
+        const runId = `run_${++nextRunSeq}`;
+        durableRuns.set(runId, {
+          conversationId,
+          content,
+          scenario: current.chat.durableRun ?? deriveDurableRun(current.chat.run),
+          eventsCallCount: 0,
+          terminalObserved: false,
+        });
+        return runId;
       },
     };
     await use(controller);

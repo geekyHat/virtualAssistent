@@ -53,6 +53,7 @@ def _queued_run(owner, conversation_id: uuid.UUID, *, key: str) -> DurableRun:
         eval_duration_ns=None,
         lease_owner=None,
         lease_until=None,
+        cancel_requested_at=None,
         fence=0,
         created_at=now,
         updated_at=now,

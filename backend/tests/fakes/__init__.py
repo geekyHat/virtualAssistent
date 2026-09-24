@@ -18,7 +18,7 @@ from newray.modules.conversations import Conversation, Message, MessageRole
 from newray.modules.identity import Organization, Session, User
 from newray.modules.models import ModelInfo, ModelReadiness, ReadinessState
 from newray.modules.profiles import AProfile, ModelBinding, Profile, ProfileVersion
-from newray.modules.runs import DurableRun, RunState
+from newray.modules.runs import DurableRun, EventPage, RunEvent, RunState
 
 
 class FakeClock:
@@ -691,11 +691,38 @@ class InMemoryRunStore:
     prima ``claim`` su un ``resource_id`` la inizializza libera.
     """
 
+    #: Retention dei soli ``message.delta``, allineata al valore della
+    #: migrazione 0011 (nessuna importazione diretta: la migrazione è SQL
+    #: versionato, il fake ne rispecchia solo il comportamento).
+    MAX_RETAINED_DELTA_EVENTS = 50
+
     def __init__(self) -> None:
         self._runs: dict[uuid.UUID, DurableRun] = {}
         #: resource_id -> {"owner_worker", "owner_run", "lease_until"}
         self._resources: dict[str, dict[str, object]] = {}
         self._workers: dict[uuid.UUID, datetime] = {}
+        self._events: dict[uuid.UUID, list[RunEvent]] = {}
+
+    def _append_event(self, run: DurableRun, type_: str, payload: dict[str, object]) -> None:
+        events = self._events.setdefault(run.id, [])
+        # La sequenza deve restare monotona anche dopo la potatura: usa il
+        # massimo mai assegnato, non la lunghezza della lista.
+        sequence = max((event.sequence for event in events), default=0) + 1
+        events.append(
+            RunEvent(
+                id=uuid.uuid4(),
+                run_id=run.id,
+                sequence=sequence,
+                type=type_,
+                payload=payload,
+                occurred_at=datetime.now(UTC),
+            )
+        )
+        if type_ == "message.delta":
+            deltas = [event for event in events if event.type == "message.delta"]
+            if len(deltas) > self.MAX_RETAINED_DELTA_EVENTS:
+                to_drop = {event.id for event in deltas[: -self.MAX_RETAINED_DELTA_EVENTS]}
+                self._events[run.id] = [event for event in events if event.id not in to_drop]
 
     def enqueue(self, run: DurableRun) -> DurableRun:
         existing = self.find_by_key(
@@ -706,6 +733,7 @@ class InMemoryRunStore:
                 raise Conflict("chiave di idempotenza riutilizzata con richiesta diversa")
             return existing
         self._runs[run.id] = run
+        self._append_event(run, "run.queued", {})
         return run
 
     def get(self, scope: Scope, run_id: uuid.UUID) -> DurableRun | None:
@@ -742,6 +770,21 @@ class InMemoryRunStore:
             and run.state in (RunState.QUEUED, RunState.RUNNING)
         )
 
+    def find_active_by_conversation(
+        self, scope: Scope, conversation_id: uuid.UUID
+    ) -> DurableRun | None:
+        candidates = [
+            run
+            for run in self._runs.values()
+            if run.organization_id == scope.organization_id
+            and run.owner_id == scope.user_id
+            and run.conversation_id == conversation_id
+            and run.state in (RunState.QUEUED, RunState.RUNNING)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda run: run.created_at)
+
     def claim(
         self, worker_id: uuid.UUID, lease_seconds: int, resource_id: str
     ) -> DurableRun | None:
@@ -770,6 +813,7 @@ class InMemoryRunStore:
             "owner_run": run.id,
             "lease_until": now + timedelta(seconds=lease_seconds),
         }
+        self._append_event(updated, "run.started", {})
         return updated
 
     def heartbeat(
@@ -804,6 +848,7 @@ class InMemoryRunStore:
             and lease["owner_run"] == run_id
         ):
             lease["lease_until"] = now + timedelta(seconds=lease_seconds)
+        self._append_event(updated, "message.delta", {"text": partial_text})
         return updated
 
     def finalize(
@@ -845,6 +890,17 @@ class InMemoryRunStore:
             and lease["owner_run"] == run_id
         ):
             del self._resources[resource_id]
+        self._append_event(
+            updated,
+            f"run.{state.value}",
+            {
+                "finish_reason": finish_reason,
+                "text": partial_text,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "eval_duration_ns": eval_duration_ns,
+            },
+        )
         return updated
 
     def reclaim_stale(self, grace_seconds: int) -> tuple[DurableRun, ...]:
@@ -868,6 +924,17 @@ class InMemoryRunStore:
             for resource_id, lease in list(self._resources.items()):
                 if lease["owner_run"] == run.id:
                     del self._resources[resource_id]
+            self._append_event(
+                updated,
+                "run.interrupted",
+                {
+                    "finish_reason": "worker_lost",
+                    "text": updated.partial_text,
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "eval_duration_ns": None,
+                },
+            )
             recovered.append(updated)
         return tuple(recovered)
 
@@ -876,3 +943,49 @@ class InMemoryRunStore:
 
     def touch_worker(self, worker_id: uuid.UUID) -> None:
         self._workers[worker_id] = datetime.now(UTC)
+
+    def list_events(self, scope: Scope, run_id: uuid.UUID, after_sequence: int) -> EventPage:
+        run = self.get(scope, run_id)
+        if run is None:
+            return EventPage(events=(), gap=False, latest_sequence=0)
+        all_events = self._events.get(run_id, ())
+        events = sorted(
+            (event for event in all_events if event.sequence > after_sequence),
+            key=lambda event: event.sequence,
+        )
+        gap = bool(events) and events[0].sequence != after_sequence + 1
+        latest = max((event.sequence for event in all_events), default=0)
+        return EventPage(events=tuple(events), gap=gap, latest_sequence=latest)
+
+    def request_cancel(self, scope: Scope, run_id: uuid.UUID) -> DurableRun | None:
+        run = self.get(scope, run_id)
+        if run is None:
+            return None
+        if run.state not in (RunState.QUEUED, RunState.RUNNING):
+            return run
+        now = datetime.now(UTC)
+        if run.state is RunState.QUEUED:
+            updated = replace(
+                run,
+                state=RunState.CANCELLED,
+                finish_reason="cancelled_by_user",
+                cancel_requested_at=run.cancel_requested_at or now,
+                updated_at=now,
+            )
+            self._append_event(
+                updated,
+                "run.cancelled",
+                {
+                    "finish_reason": "cancelled_by_user",
+                    "text": "",
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "eval_duration_ns": None,
+                },
+            )
+        else:
+            updated = replace(
+                run, cancel_requested_at=run.cancel_requested_at or now, updated_at=now
+            )
+        self._runs[run_id] = updated
+        return updated

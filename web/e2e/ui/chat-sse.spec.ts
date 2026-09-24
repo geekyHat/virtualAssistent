@@ -9,6 +9,15 @@ import type { Page } from "@playwright/test";
  * `cancelled`, vuoto), `error` dopo delta (testo parziale conservato),
  * EOF senza terminale (guasto, non completion) e il meter token/s
  * (valore autorevole dal terminale, mai un zero inventato).
+ *
+ * SKIP (P-06): la UI non chiama più `POST /conversations/{id}/run` (route
+ * inline preservata lato backend, ma non più raggiunta dal composer,
+ * migrato al percorso durevole — "senza doppio motore"). Guidare il
+ * click "Invia" qui non intercetta più nulla: questi scenari non
+ * verificano più un comportamento reale del browser. Il file resta come
+ * documentazione degli scenari originali; la stessa copertura sul nuovo
+ * percorso è in `run-events.spec.ts`. Il contratto HTTP inline resta
+ * provato lato backend (`test_http_chat_run.py`), non qui.
  */
 
 const sse = (events: Array<{ event: string; data: Record<string, unknown> }>): string =>
@@ -25,7 +34,8 @@ async function sendAndSettle(page: Page, content: string) {
   await page.getByRole("button", { name: "Invia" }).click();
 }
 
-test.describe("Chat — guasti SSE (B-03.2-35)", () => {
+test.describe
+  .skip("Chat — guasti SSE (B-03.2-35) [P-06: route inline non più chiamata dalla UI]", () => {
   test("done stop: completata con meter autorevole dal terminale", async ({ page, session }) => {
     session.set({ me: { kind: "ok", identity: defaultIdentity } });
     await openConversation(page);

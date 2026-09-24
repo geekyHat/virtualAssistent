@@ -14,6 +14,8 @@ export interface SseFrame {
   event: string;
   /** Righe `data:` giunte; una sola riga nel contratto NewRay. */
   data: string;
+  /** `id:` del frame (P-06, cursore per riconnessione); assente altrove. */
+  id: number | null;
 }
 
 /**
@@ -65,15 +67,20 @@ export class SseDecoder {
 
 function parseBlock(block: string): SseFrame | null {
   let event = "message";
+  let id: number | null = null;
   const dataLines: string[] = [];
   for (const line of block.split("\n")) {
     if (line.startsWith("event:")) {
       event = line.slice(6).trim();
     } else if (line.startsWith("data:")) {
       dataLines.push(line.slice(5).replace(/^ /, ""));
+    } else if (line.startsWith("id:")) {
+      const raw = line.slice(3).trim();
+      const parsed = Number(raw);
+      id = raw !== "" && Number.isFinite(parsed) ? parsed : null;
     }
     // `retry:` e i commenti (`:`) non sono usati dal contratto NewRay.
   }
   if (dataLines.length === 0) return null;
-  return { event, data: dataLines.join("\n") };
+  return { event, data: dataLines.join("\n"), id };
 }

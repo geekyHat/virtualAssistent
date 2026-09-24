@@ -12,7 +12,7 @@ from sqlalchemy.engine import Connection, Engine, Row
 from newray.kernel.errors import Conflict, NotFound
 from newray.kernel.identity import Scope
 
-from ..durable import DurableRun, RunState, thaw_json
+from ..durable import DurableRun, EventPage, RunEvent, RunState, thaw_json
 
 
 def _scope(conn: Connection, scope: Scope) -> None:
@@ -41,16 +41,31 @@ def _run(row: Row[Any]) -> DurableRun:
         lease_owner=row.lease_owner,
         lease_until=row.lease_until,
         fence=row.fence,
+        cancel_requested_at=row.cancel_requested_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
+    )
+
+
+def _event(row: Row[Any]) -> RunEvent:
+    return RunEvent(
+        id=row.id,
+        run_id=row.run_id,
+        sequence=row.sequence,
+        type=row.type,
+        payload=dict(row.payload),
+        occurred_at=row.occurred_at,
     )
 
 
 _COLUMNS = (
     "id, conversation_id, organization_id, owner_id, idempotency_key, payload_hash, "
     "state, snapshot, partial_text, finish_reason, prompt_tokens, completion_tokens, "
-    "eval_duration_ns, lease_owner, lease_until, fence, created_at, updated_at"
+    "eval_duration_ns, lease_owner, lease_until, fence, cancel_requested_at, "
+    "created_at, updated_at"
 )
+
+_EVENT_COLUMNS = "id, run_id, sequence, type, payload, occurred_at"
 
 
 class PostgresRunStore:
@@ -74,9 +89,10 @@ class PostgresRunStore:
             inserted = conn.execute(
                 text(
                     "INSERT INTO runs (id, conversation_id, organization_id, owner_id, "
-                    "idempotency_key, payload_hash, state, snapshot, created_at, updated_at) "
+                    "idempotency_key, payload_hash, state, snapshot, next_event_sequence, "
+                    "created_at, updated_at) "
                     "VALUES (:id, :conversation_id, :organization_id, :owner_id, "
-                    ":idempotency_key, :payload_hash, 'queued', CAST(:snapshot AS jsonb), "
+                    ":idempotency_key, :payload_hash, 'queued', CAST(:snapshot AS jsonb), 1, "
                     ":created_at, :updated_at) "
                     "ON CONFLICT ON CONSTRAINT runs_scope_key DO NOTHING "
                     "RETURNING " + _COLUMNS
@@ -96,6 +112,20 @@ class PostgresRunStore:
                 },
             ).first()
             if inserted is not None:
+                conn.execute(
+                    text(
+                        "INSERT INTO run_events (id, run_id, organization_id, owner_id, "
+                        "sequence, type, payload, occurred_at) VALUES "
+                        "(gen_random_uuid(), :run_id, :organization_id, :owner_id, 1, "
+                        "'run.queued', '{}'::jsonb, :occurred_at)"
+                    ),
+                    {
+                        "run_id": run.id,
+                        "organization_id": run.organization_id,
+                        "owner_id": run.owner_id,
+                        "occurred_at": run.created_at,
+                    },
+                )
                 return _run(inserted)
             existing = conn.execute(
                 text(
@@ -128,6 +158,21 @@ class PostgresRunStore:
                     "AND idempotency_key = :idempotency_key"
                 ),
                 {"conversation_id": conversation_id, "idempotency_key": idempotency_key},
+            ).first()
+            return None if row is None else _run(row)
+
+    def find_active_by_conversation(
+        self, scope: Scope, conversation_id: uuid.UUID
+    ) -> DurableRun | None:
+        with self._engine.connect() as conn:
+            _scope(conn, scope)
+            row = conn.execute(
+                text(
+                    "SELECT " + _COLUMNS + " FROM runs WHERE conversation_id = :conversation_id "
+                    "AND state IN ('queued', 'running') "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"conversation_id": conversation_id},
             ).first()
             return None if row is None else _run(row)
 
@@ -239,3 +284,70 @@ class PostgresRunStore:
                 ),
                 {"worker_id": worker_id},
             )
+
+    def list_events(self, scope: Scope, run_id: uuid.UUID, after_sequence: int) -> EventPage:
+        with self._engine.connect() as conn:
+            _scope(conn, scope)
+            rows = conn.execute(
+                text(
+                    "SELECT " + _EVENT_COLUMNS + " FROM run_events "
+                    "WHERE run_id = :run_id AND sequence > :after_sequence ORDER BY sequence"
+                ),
+                {"run_id": run_id, "after_sequence": after_sequence},
+            ).all()
+            latest = conn.execute(
+                text("SELECT COALESCE(MAX(sequence), 0) FROM run_events WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            ).scalar_one()
+            # Buco: il primo evento restituito non è il successore diretto
+            # del cursore richiesto → qualcosa fra i due è stato potato
+            # (retention dei soli message.delta, migrazione 0011).
+            gap = bool(rows) and rows[0].sequence != after_sequence + 1
+            return EventPage(
+                events=tuple(_event(row) for row in rows), gap=gap, latest_sequence=int(latest)
+            )
+
+    def request_cancel(self, scope: Scope, run_id: uuid.UUID) -> DurableRun | None:
+        with self._engine.begin() as conn:
+            _scope(conn, scope)
+            row = conn.execute(
+                text(
+                    "UPDATE runs SET "
+                    "cancel_requested_at = COALESCE(cancel_requested_at, now()), "
+                    "state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, "
+                    "finish_reason = CASE WHEN state = 'queued' THEN 'cancelled_by_user' "
+                    "ELSE finish_reason END, "
+                    "next_event_sequence = CASE WHEN state = 'queued' "
+                    "THEN next_event_sequence + 1 ELSE next_event_sequence END, "
+                    "updated_at = now() "
+                    "WHERE id = :run_id AND state IN ('queued', 'running') "
+                    "RETURNING " + _COLUMNS + ", next_event_sequence"
+                ),
+                {"run_id": run_id},
+            ).first()
+            if row is None:
+                existing = conn.execute(
+                    text("SELECT " + _COLUMNS + " FROM runs WHERE id = :run_id"),
+                    {"run_id": run_id},
+                ).first()
+                return None if existing is None else _run(existing)
+
+            if row.state == "cancelled":
+                conn.execute(
+                    text(
+                        "INSERT INTO run_events (id, run_id, organization_id, owner_id, "
+                        "sequence, type, payload, occurred_at) VALUES "
+                        "(gen_random_uuid(), :run_id, :organization_id, :owner_id, "
+                        ":sequence, 'run.cancelled', "
+                        "jsonb_build_object('finish_reason', 'cancelled_by_user', 'text', '', "
+                        "'prompt_tokens', NULL, 'completion_tokens', NULL, "
+                        "'eval_duration_ns', NULL), now())"
+                    ),
+                    {
+                        "run_id": run_id,
+                        "organization_id": row.organization_id,
+                        "owner_id": row.owner_id,
+                        "sequence": row.next_event_sequence,
+                    },
+                )
+            return _run(row)

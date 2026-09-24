@@ -31,6 +31,7 @@ from newray.modules.models import (
 )
 
 from .durable import (
+    FINISH_REASON_CANCELLED_BY_USER,
     FINISH_REASON_DEADLINE_EXCEEDED,
     FINISH_REASON_EMPTY_OUTPUT,
     FINISH_REASON_MODEL_ERROR,
@@ -81,11 +82,12 @@ class _Progress:
     """Contenitore mutabile condiviso fra stream e heartbeat (asyncio
     cooperativo: nessuna vera concorrenza, nessun lock necessario)."""
 
-    __slots__ = ("text", "lost_fence")
+    __slots__ = ("text", "lost_fence", "cancel_requested")
 
     def __init__(self) -> None:
         self.text = ""
         self.lost_fence = False
+        self.cancel_requested = False
 
 
 class RunWorker:
@@ -166,6 +168,12 @@ class RunWorker:
             if updated is None:
                 progress.lost_fence = True
                 return
+            if updated.cancel_requested_at is not None:
+                # Stop cooperativo: nessun altro heartbeat, la generazione
+                # va interrotta e finalizzata come cancelled (§8.3, "il
+                # worker propaga [la cancellazione] a inference e tool").
+                progress.cancel_requested = True
+                return
 
     async def _execute(self, run: DurableRun) -> None:
         request = _chat_request_from_snapshot(run.snapshot)
@@ -184,7 +192,7 @@ class RunWorker:
         stream = self._chat_model.stream(request)
         try:
             async for event in stream:
-                if progress.lost_fence:
+                if progress.lost_fence or progress.cancel_requested:
                     break
                 if isinstance(event, ContentDelta):
                     progress.text += event.text
@@ -209,6 +217,19 @@ class RunWorker:
         if progress.lost_fence:
             # Un worker più recente possiede già il run: nessuna scrittura,
             # né di stato né di messaggi (fencing).
+            return
+
+        if progress.cancel_requested:
+            await self._finalize_only(
+                run,
+                fence,
+                RunState.CANCELLED,
+                FINISH_REASON_CANCELLED_BY_USER,
+                None,
+                None,
+                None,
+                progress.text,
+            )
             return
 
         if deadline_hit:

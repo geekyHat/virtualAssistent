@@ -253,7 +253,27 @@ test.describe("B-08.8 — workspace modulare", () => {
     const runFinished = new Promise<void>((resolve) => {
       finishRun = resolve;
     });
-    await page.route("**/api/v1/conversations/*/run", async (route) => {
+    await page.route("**/api/v1/conversations/*/runs", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const now = new Date().toISOString();
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "run_stale",
+          conversation_id: "conv_stale",
+          state: "queued",
+          partial_text: "",
+          finish_reason: null,
+          prompt_tokens: null,
+          completion_tokens: null,
+          eval_duration_ns: null,
+          created_at: now,
+          updated_at: now,
+        }),
+      });
+    });
+    await page.route("**/api/v1/runs/*/events*", async (route) => {
       startRun?.();
       await new Promise<void>((release) => {
         releaseRun = release;
@@ -262,7 +282,9 @@ test.describe("B-08.8 — workspace modulare", () => {
         .fulfill({
           status: 200,
           contentType: "text/event-stream",
-          body: 'event: delta\ndata: {"text":"RISPOSTA_VECCHIA"}\n\nevent: done\ndata: {"finish_reason":"stop"}\n\n',
+          body:
+            'id: 1\nevent: message.delta\ndata: {"text":"RISPOSTA_VECCHIA"}\n\n' +
+            'id: 2\nevent: run.completed\ndata: {"finish_reason":"stop","text":"RISPOSTA_VECCHIA"}\n\n',
         })
         .catch(() => {});
       finishRun?.();
@@ -293,7 +315,27 @@ test.describe("B-08.8 — workspace modulare", () => {
     const runStarted = new Promise<void>((resolve) => {
       startRun = resolve;
     });
-    await page.route("**/api/v1/conversations/*/run", async (route) => {
+    await page.route("**/api/v1/conversations/*/runs", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const now = new Date().toISOString();
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "run_secret",
+          conversation_id: "conv_secret",
+          state: "queued",
+          partial_text: "",
+          finish_reason: null,
+          prompt_tokens: null,
+          completion_tokens: null,
+          eval_duration_ns: null,
+          created_at: now,
+          updated_at: now,
+        }),
+      });
+    });
+    await page.route("**/api/v1/runs/*/events*", async (route) => {
       startRun?.();
       await new Promise<void>((release) => {
         releaseRun = release;
@@ -302,7 +344,9 @@ test.describe("B-08.8 — workspace modulare", () => {
         .fulfill({
           status: 200,
           contentType: "text/event-stream",
-          body: 'event: delta\ndata: {"text":"SEGRETO_A"}\n\nevent: done\ndata: {"finish_reason":"stop"}\n\n',
+          body:
+            'id: 1\nevent: message.delta\ndata: {"text":"SEGRETO_A"}\n\n' +
+            'id: 2\nevent: run.completed\ndata: {"finish_reason":"stop","text":"SEGRETO_A"}\n\n',
         })
         .catch(() => {});
     });

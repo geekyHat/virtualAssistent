@@ -18,7 +18,7 @@ from newray.kernel.errors import Conflict, NotFound, QueueFull
 from newray.kernel.identity import Principal, new_id
 
 from .application import InlineRunService
-from .durable import DurableRun, RunState, RunStore
+from .durable import DurableRun, EventPage, RunState, RunStore
 
 #: Limite di coda per scope (organizzazione/proprietario), non globale: il
 #: pilot è a singolo proprietario per installazione (ADR 0002). Valore
@@ -123,6 +123,7 @@ class DurableRunService:
             lease_owner=None,
             lease_until=None,
             fence=0,
+            cancel_requested_at=None,
             created_at=now,
             updated_at=now,
         )
@@ -133,3 +134,28 @@ class DurableRunService:
         if run is None:
             raise NotFound("run non trovato")
         return run
+
+    async def active_for_conversation(
+        self, principal: Principal, conversation_id: uuid.UUID
+    ) -> DurableRun | None:
+        """Run non terminale più recente della conversazione, o ``None``
+        (P-06: resume — una scheda nuova o un refresh ritrovano il run in
+        corso senza già conoscerne l'id, senza inventare un esito)."""
+        return await asyncio.to_thread(
+            self._store.find_active_by_conversation, principal.scope, conversation_id
+        )
+
+    async def cancel(self, principal: Principal, run_id: uuid.UUID) -> DurableRun:
+        """Richiesta di cancellazione persistita e idempotente (P-06)."""
+        run = await asyncio.to_thread(self._store.request_cancel, principal.scope, run_id)
+        if run is None:
+            raise NotFound("run non trovato")
+        return run
+
+    async def events(
+        self, principal: Principal, run_id: uuid.UUID, after_sequence: int
+    ) -> EventPage:
+        """Eventi oltre il cursore, scoped (P-06); ``gap=True`` → resync."""
+        return await asyncio.to_thread(
+            self._store.list_events, principal.scope, run_id, after_sequence
+        )

@@ -1124,6 +1124,55 @@
         "summary": "Rename Conversation"
       }
     },
+    "/api/v1/conversations/{conversation_id}/active-run": {
+      "get": {
+        "description": "Run non terminale più recente della conversazione, o ``null``\n(P-06: resume). Una scheda nuova o un refresh a metà generazione\nla chiamano per ritrovare e riprendere lo stream di un run in\ncorso senza già possederne l'id; conversazione fuori scope →\nstesso ``null`` di \"nessun run attivo\", non un 404 distinto (RLS\nnon fa emergere righe che il principal non può vedere).",
+        "operationId": "active_run_api_v1_conversations__conversation_id__active_run_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RunDTO"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Active Run Api V1 Conversations  Conversation Id  Active Run Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Active Run"
+      }
+    },
     "/api/v1/conversations/{conversation_id}/messages": {
       "get": {
         "description": "Messaggi in ordine di sequenza, da ``after_sequence`` escluso.",
@@ -1581,6 +1630,97 @@
           }
         },
         "summary": "Get Run"
+      }
+    },
+    "/api/v1/runs/{run_id}/cancel": {
+      "post": {
+        "description": "Cancellazione persistita e idempotente (P-06, NewRay.md §8.3).\n\nUn run ``queued`` transita subito; un run ``running`` la vede\npropagata dal worker al prossimo heartbeat. Un run già terminale\nnon cambia stato: la risposta riflette lo stato reale, non un\nsuccesso fittizio.",
+        "operationId": "cancel_run_api_v1_runs__run_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDTO"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Run"
+      }
+    },
+    "/api/v1/runs/{run_id}/events": {
+      "get": {
+        "description": "Eventi durevoli con replay/cursore (P-06, NewRay.md §19.3).\n\nVerifica scope prima di aprire lo stream (404 uniforme se il run\nnon esiste/non è tuo, coerente con le altre risorse private); poi\nreplay/poll con re-check della sessione a ogni giro — \"la\nconnessione non prolunga i grant\". Cursore più vecchio del delta\npiù vecchio rimasto (retention, 0011) → un solo evento ``resync``\ncon lo snapshot corrente, mai un buco silenzioso.",
+        "operationId": "stream_events_api_v1_runs__run_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_sequence",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "After Sequence",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Events"
       }
     },
     "/api/v1/session": {

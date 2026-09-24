@@ -20,6 +20,7 @@ from newray.interfaces.http.routes.chat import build_router as build_chat_router
 from newray.interfaces.http.routes.conversations import build_router as build_conversations_router
 from newray.interfaces.http.routes.identity import build_router as build_identity_router
 from newray.interfaces.http.routes.profiles import build_router as build_profiles_router
+from newray.interfaces.http.routes.runs import DEFAULT_EVENTS_POLL_SECONDS
 from newray.interfaces.http.routes.runs import build_router as build_runs_router
 from newray.modules.conversations import ConversationService
 from newray.modules.identity import IdentityService
@@ -50,6 +51,7 @@ def create_app(
     public_origin: str = "http://testserver",
     run_store: RunStore | None = None,
     runs_max_queue_depth: int = 50,
+    run_events_poll_seconds: float = DEFAULT_EVENTS_POLL_SECONDS,
 ) -> FastAPI:
     """Applicazione FastAPI attorno ai servizi iniettati.
 
@@ -67,7 +69,9 @@ def create_app(
             if ollama_client is not None:
                 await ollama_client.aclose()
 
-    app = _http_app(lifespan, cookie_secure, public_origin)
+    app = _http_app(
+        lifespan, cookie_secure, public_origin, run_events_poll_seconds=run_events_poll_seconds
+    )
     app.state.identity_service = identity
     app.state.conversation_service = conversations
     app.state.profile_service = profiles
@@ -85,6 +89,8 @@ def _http_app(
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]],
     cookie_secure: bool,
     public_origin: str,
+    *,
+    run_events_poll_seconds: float = DEFAULT_EVENTS_POLL_SECONDS,
 ) -> FastAPI:
     app = FastAPI(title="NewRay", version="0.1.0", lifespan=lifespan)
     app.add_middleware(SameOriginMiddleware, public_origin=public_origin)
@@ -93,7 +99,7 @@ def _http_app(
     app.include_router(build_conversations_router())
     app.include_router(build_profiles_router())
     app.include_router(build_chat_router())
-    app.include_router(build_runs_router())
+    app.include_router(build_runs_router(run_events_poll_seconds))
     return app
 
 
@@ -136,4 +142,9 @@ def build_app() -> FastAPI:
             app.state.durable_run_service = build_durable_run_service(engine, inline, settings)
             yield
 
-    return _http_app(lifespan, settings.cookie_secure, settings.public_origin)
+    return _http_app(
+        lifespan,
+        settings.cookie_secure,
+        settings.public_origin,
+        run_events_poll_seconds=settings.run_events_poll_seconds,
+    )

@@ -62,6 +62,31 @@ export interface paths {
         patch: operations["rename_conversation_api_v1_conversations__conversation_id__patch"];
         trace?: never;
     };
+    "/api/v1/conversations/{conversation_id}/active-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Active Run
+         * @description Run non terminale più recente della conversazione, o ``null``
+         *     (P-06: resume). Una scheda nuova o un refresh a metà generazione
+         *     la chiamano per ritrovare e riprendere lo stream di un run in
+         *     corso senza già possederne l'id; conversazione fuori scope →
+         *     stesso ``null`` di "nessun run attivo", non un 404 distinto (RLS
+         *     non fa emergere righe che il principal non può vedere).
+         */
+        get: operations["active_run_api_v1_conversations__conversation_id__active_run_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{conversation_id}/messages": {
         parameters: {
             query?: never;
@@ -289,6 +314,58 @@ export interface paths {
          * @description Snapshot del run; fuori scope → 404 (§7.3).
          */
         get: operations["get_run_api_v1_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runs/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Run
+         * @description Cancellazione persistita e idempotente (P-06, NewRay.md §8.3).
+         *
+         *     Un run ``queued`` transita subito; un run ``running`` la vede
+         *     propagata dal worker al prossimo heartbeat. Un run già terminale
+         *     non cambia stato: la risposta riflette lo stato reale, non un
+         *     successo fittizio.
+         */
+        post: operations["cancel_run_api_v1_runs__run_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runs/{run_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream Events
+         * @description Eventi durevoli con replay/cursore (P-06, NewRay.md §19.3).
+         *
+         *     Verifica scope prima di aprire lo stream (404 uniforme se il run
+         *     non esiste/non è tuo, coerente con le altre risorse private); poi
+         *     replay/poll con re-check della sessione a ogni giro — "la
+         *     connessione non prolunga i grant". Cursore più vecchio del delta
+         *     più vecchio rimasto (retention, 0011) → un solo evento ``resync``
+         *     con lo snapshot corrente, mai un buco silenzioso.
+         */
+        get: operations["stream_events_api_v1_runs__run_id__events_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1017,6 +1094,37 @@ export interface operations {
             };
         };
     };
+    active_run_api_v1_conversations__conversation_id__active_run_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDTO"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_messages_api_v1_conversations__conversation_id__messages_get: {
         parameters: {
             query?: {
@@ -1342,6 +1450,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunDTO"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_run_api_v1_runs__run_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDTO"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stream_events_api_v1_runs__run_id__events_get: {
+        parameters: {
+            query?: {
+                after_sequence?: number;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
