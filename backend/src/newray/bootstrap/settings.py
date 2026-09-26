@@ -57,11 +57,33 @@ class Settings(BaseSettings):
     #: Budget iniziale prudente; non modifica tag o Modelfile già installati.
     model_context_length: int = Field(default=8192, ge=1024, le=16384)
     model_max_context_length: int = Field(default=16384, ge=1024, le=32768)
+    #: Deadline complessiva della generazione di un run (P-05, §8.3). Il
+    #: worker interrompe con ``finish_reason='timeout'``; non è il timeout
+    #: di inattività dell'adapter Ollama (fra due chunk), che resta
+    #: separato.
+    run_max_wall_seconds: float = Field(default=300.0, gt=0, le=3_600)
+    #: Durata del lease del worker sul run (P-05). Deve essere sensibilmente
+    #: maggiore dell'heartbeat perché una pausa breve del worker non
+    #: sblocchi il run per un reap.
+    run_lease_duration_seconds: int = Field(default=45, ge=5, le=600)
+    #: Cadenza di rinnovo del lease. Deve restare < lease.
+    run_heartbeat_seconds: float = Field(default=15.0, gt=0, le=300)
+    #: Backoff quando la coda è vuota; troppo basso spreca CPU, troppo alto
+    #: rallenta il pickup di nuovi run.
+    run_idle_backoff_seconds: float = Field(default=1.0, gt=0, le=60)
 
     @model_validator(mode="after")
     def _valida_budget_modello(self) -> Settings:
         if self.model_context_length > self.model_max_context_length:
             raise ValueError("NEWRAY_MODEL_CONTEXT_LENGTH supera il massimo consentito")
+        return self
+
+    @model_validator(mode="after")
+    def _valida_lease_run(self) -> Settings:
+        if self.run_heartbeat_seconds >= self.run_lease_duration_seconds:
+            raise ValueError(
+                "NEWRAY_RUN_HEARTBEAT_SECONDS deve essere < NEWRAY_RUN_LEASE_DURATION_SECONDS"
+            )
         return self
 
     @model_validator(mode="after")

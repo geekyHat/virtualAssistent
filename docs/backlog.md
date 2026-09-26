@@ -374,7 +374,7 @@ di produzione. `dompurify` è fissato a 3.4.16.
 
 ### P-05 — Run testuale durevole, worker e scheduler
 
-- **Stato / priorità:** In corso (24/09/2026) / P0.
+- **Stato / priorità:** Completato (26/09/2026) / P0.
 - **Proprietario:** runs/scheduler; porte conversations/profiles/models.
 - **Dipendenze:** P-02, P-03.
 - **Contratto e risultato:** `POST /conversations/{id}/runs` idempotente e
@@ -458,6 +458,87 @@ tempo/token/turni, endpoint pubblico `POST /conversations/{id}/runs` e
 snapshot, wiring nel bootstrap (launcher del worker con ownership/readiness
 esplicite), restart cross-process, un'inference generativa attiva per
 risorsa e prove di contenzione GPU.
+
+**Terza slice interna P-05 (26/09/2026) — chiusura.** Ha portato:
+
+- `ChatModelRunExecutor` (`backend/src/newray/modules/runs/executor.py`)
+  come implementazione del protocollo `RunExecutor`: ricostruisce
+  `ChatRequest` dallo snapshot congelato del run, consuma lo stream del
+  binding, accumula il testo e chiama `PartialCheckpoint.save` ad ogni
+  delta. La **deadline complessiva** è applicata con `asyncio.timeout`
+  (parametro `max_wall_seconds`), distinta dal timeout di inattività
+  dell'adapter Ollama: superato il budget, il run diventa `INTERRUPTED`
+  con `finish_reason='timeout'`. Errori `ModelUnavailable`,
+  `InferenceFailed`, `InferenceTimeout` sono mappati su `FAILED` con
+  codice stabile; nessuna traccia del vendor esce da qui. `LeaseLost`
+  sollevato dal checkpoint si propaga al worker che non finalizza (P-05
+  precedente slice).
+- `RunLauncher` (`backend/src/newray/modules/runs/launcher.py`):
+  ownership cooperativa di **un solo** :class:`Worker` per il pilot,
+  `start/stop` con `should_stop` event asincrono e cancellazione dura
+  del task se lo stop supera il timeout. Un solo binding attivo per
+  risorsa (§8, ADR 0006): il pilot avvia un launcher, non uno per
+  utente. Non ricicla GPU per TTL — il fencing sul lease impedisce che
+  un vecchio worker finalizzi se qualcuno lo forza offline.
+- Route pubbliche (`backend/src/newray/interfaces/http/routes/runs.py`):
+  `POST /api/v1/conversations/{id}/runs` (201, `Idempotency-Key`
+  obbligatoria come header) restituisce lo snapshot iniziale e
+  `Location: /api/v1/runs/{id}`; `GET /api/v1/runs/{id}` restituisce lo
+  snapshot autorevole con state/finish_reason/partial_text/metriche/
+  model_name/digest/context_truncated. Il DTO `RunSnapshotDTO` non
+  espone la struttura interna dello snapshot (input/binding congelati
+  restano privati del backend). Gli eventi in streaming appartengono a
+  P-06 (non implementati qui). Idempotenza: stessa chiave + stesso
+  payload → stesso run id; stessa chiave + payload diverso → 409
+  CONFLICT dal `DurableRunService.create`.
+- Wiring: `Settings` aggiunge quattro parametri (`run_max_wall_seconds`,
+  `run_lease_duration_seconds`, `run_heartbeat_seconds`,
+  `run_idle_backoff_seconds`) con validatore `heartbeat < lease`.
+  `build_app` compone `DurableRunService`, `Worker` e `RunLauncher` nel
+  lifespan (start/stop cooperativo via `AsyncExitStack`), condividendo
+  l'unico engine PostgreSQL. `create_app` accetta `durable_run_service`
+  e `run_launcher` opzionali per l'iniezione nei test. Contratti
+  rigenerati: `contracts/openapi.json` e `web/src/shared/contracts/api.d.ts`
+  includono `CreateRunRequest`, `RunSnapshotDTO` e le due nuove route.
+
+Prove aggiunte:
+- `backend/tests/unit/test_run_executor.py` (8 test): completamento
+  regolare, stream chiuso senza Completion → FAILED, resume dal partial
+  precedente, deadline `max_wall_seconds` scaduta → INTERRUPTED con
+  partial, `InferenceFailed` e `ModelUnavailable` mappati, `LeaseLost`
+  propagato, validazione costruttore.
+- `backend/tests/unit/test_run_launcher.py` (5 test): start/stop svuota
+  la coda, stop idle senza sollevare, doppio start rifiutato, stop
+  prima di start no-op, backoff non positivo rifiutato.
+- `backend/tests/integration/test_run_worker.py` +1 test:
+  `test_partial_sopravvive_al_riclaim_dopo_lease_scaduto` prova che il
+  parziale scritto dal vecchio worker resta visibile al nuovo dopo il
+  reclaim; il nuovo worker prosegue e finalizza.
+- `backend/tests/integration/test_api_runs.py` (2 test end-to-end):
+  bootstrap → seed profili → conversazione → `POST /runs` senza
+  `Idempotency-Key` è 422; con chiave: 201 + `Location`, ripetizione
+  stessa chiave + stesso payload → stesso run id, chiave + payload
+  diverso → 409, il worker consuma la coda con `EchoChatModel` e il
+  poll di `GET /runs/{id}` converge a `completed`; con `revoke` e
+  cookie svuotato l'accesso alla route torna 401.
+
+Esecuzioni (26/09/2026, cluster PostgreSQL 16 + pgvector locale):
+`uv run pytest -q tests/unit tests/contracts` da `backend/`: **337
+passed**, 2 warning di terze parti; `uv run pytest -q tests/integration
+--tb=short` con `NEWRAY_TEST_*_URL`: **73 passed**, 2 warning di terze
+parti; `uv run ruff check`, `uv run ruff format --check`, `uv run mypy
+src` (75 file), checker architettura (75 file): tutti verdi;
+`python scripts/generate_contracts.py` verde con
+`contracts/openapi.json` e `web/src/shared/contracts/api.d.ts`
+aggiornati. Le prove di P-05 usano fake `EchoChatModel`; le prove
+**live** su Gemma reale (con GPU) sono di P-20 e restano fuori scope.
+La "contenzione GPU" della sequenza operativa è coperta dalla scelta
+di un unico `RunLauncher` per il pilot (§8): due worker sullo stesso
+binding non vengono avviati e il fence protegge comunque contro
+finalize obsoleti. Un ampliamento a più binding entrerà quando i
+profili aggiuntivi saranno reintrodotti (post-pilot). Il timeout
+"turni" citato nel contratto è pertinente al ciclo tool di P-07 e
+resta lì; nel pilot un run è una singola generazione.
 
 ### P-06 — Eventi durevoli, stop e migrazione della chat browser
 

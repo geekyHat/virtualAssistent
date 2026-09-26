@@ -109,6 +109,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{conversation_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Accoda un run durevole (idempotente) */
+        post: operations["create_run_api_v1_conversations__conversation_id__runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -251,6 +268,23 @@ export interface paths {
          *     dal catalogo → 503 ``MODEL_UNAVAILABLE`` recuperabile.
          */
         post: operations["switch_model_api_v1_profiles__profile_id__versions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Snapshot autorevole dello stato del run */
+        get: operations["get_run_api_v1_runs__run_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -449,6 +483,19 @@ export interface components {
             content: string;
             /** Idempotency Key */
             idempotency_key?: string | null;
+        };
+        /**
+         * CreateRunRequest
+         * @description Richiesta di creazione run: contenuto utente e profilo scelto.
+         */
+        CreateRunRequest: {
+            /** Content */
+            content: string;
+            /**
+             * Profile Id
+             * Format: uuid
+             */
+            profile_id: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -693,6 +740,54 @@ export interface components {
              * Format: uuid
              */
             profile_id: string;
+        };
+        /**
+         * RunSnapshotDTO
+         * @description Snapshot pubblico di un run durevole.
+         *
+         *     Espone gli stati definiti in §8 e la contabilizzazione dell'esito.
+         *     Il campo ``snapshot`` interno (input/binding congelati) resta privato
+         *     del backend; qui riportiamo solo model_name e digest utili al client.
+         */
+        RunSnapshotDTO: {
+            /** Completion Tokens */
+            completion_tokens: number | null;
+            /** Context Truncated */
+            context_truncated: boolean | null;
+            /**
+             * Conversation Id
+             * Format: uuid
+             */
+            conversation_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Digest */
+            digest: string | null;
+            /** Eval Duration Ns */
+            eval_duration_ns: number | null;
+            /** Finish Reason */
+            finish_reason: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Model Name */
+            model_name: string | null;
+            /** Partial Text */
+            partial_text: string;
+            /** Prompt Tokens */
+            prompt_tokens: number | null;
+            /** State */
+            state: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /**
          * SessionStatusDTO
@@ -1022,6 +1117,43 @@ export interface operations {
             };
         };
     };
+    create_run_api_v1_conversations__conversation_id__runs_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunSnapshotDTO"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     me_api_v1_me_get: {
         parameters: {
             query?: never;
@@ -1175,6 +1307,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProfileDTO"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_run_api_v1_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunSnapshotDTO"];
                 };
             };
             /** @description Validation Error */

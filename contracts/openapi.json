@@ -170,6 +170,28 @@
         "title": "CreateMessageRequest",
         "type": "object"
       },
+      "CreateRunRequest": {
+        "description": "Richiesta di creazione run: contenuto utente e profilo scelto.",
+        "properties": {
+          "content": {
+            "maxLength": 50000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "profile_id": {
+            "format": "uuid",
+            "title": "Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "profile_id"
+        ],
+        "title": "CreateRunRequest",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -634,6 +656,133 @@
           "profile_id"
         ],
         "title": "RunRequest",
+        "type": "object"
+      },
+      "RunSnapshotDTO": {
+        "description": "Snapshot pubblico di un run durevole.\n\nEspone gli stati definiti in §8 e la contabilizzazione dell'esito.\nIl campo ``snapshot`` interno (input/binding congelati) resta privato\ndel backend; qui riportiamo solo model_name e digest utili al client.",
+        "properties": {
+          "completion_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Tokens"
+          },
+          "context_truncated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Truncated"
+          },
+          "conversation_id": {
+            "format": "uuid",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Digest"
+          },
+          "eval_duration_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eval Duration Ns"
+          },
+          "finish_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finish Reason"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "model_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Name"
+          },
+          "partial_text": {
+            "title": "Partial Text",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Tokens"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "conversation_id",
+          "state",
+          "finish_reason",
+          "partial_text",
+          "prompt_tokens",
+          "completion_tokens",
+          "eval_duration_ns",
+          "model_name",
+          "digest",
+          "context_truncated",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RunSnapshotDTO",
         "type": "object"
       },
       "SessionStatusDTO": {
@@ -1172,6 +1321,67 @@
         "summary": "Preview inline transitoria; usare i run durevoli quando disponibili"
       }
     },
+    "/api/v1/conversations/{conversation_id}/runs": {
+      "post": {
+        "operationId": "create_run_api_v1_conversations__conversation_id__runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSnapshotDTO"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Accoda un run durevole (idempotente)"
+      }
+    },
     "/api/v1/me": {
       "get": {
         "description": "Utente corrente: identità risolta dal server, mai dal client.",
@@ -1357,6 +1567,46 @@
           }
         },
         "summary": "Switch Model"
+      }
+    },
+    "/api/v1/runs/{run_id}": {
+      "get": {
+        "operationId": "get_run_api_v1_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSnapshotDTO"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Snapshot autorevole dello stato del run"
       }
     },
     "/api/v1/session": {

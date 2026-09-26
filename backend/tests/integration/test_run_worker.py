@@ -193,6 +193,62 @@ def test_renew_lease_su_fence_valido_prolunga(enqueued_run) -> None:
     assert store.claim(other, lease_duration_seconds=30, now=t0 + timedelta(seconds=60)) is None
 
 
+def test_partial_sopravvive_al_riclaim_dopo_lease_scaduto(enqueued_run) -> None:
+    """Kill/restart: il parziale scritto dal vecchio worker resta visibile."""
+
+    _engine, store, _owner, run = enqueued_run
+    worker_a = uuid.uuid4()
+    t0 = datetime.now(UTC)
+    first = store.claim(worker_a, lease_duration_seconds=30, now=t0)
+    assert first is not None
+    ok = store.save_partial(
+        run_id=run.id,
+        worker_id=worker_a,
+        fence=first.fence,
+        partial_text="parziale-A",
+        now=t0 + timedelta(seconds=1),
+    )
+    assert ok is True
+
+    # Simulazione crash: nessun finalize, il lease scade.
+    worker_b = uuid.uuid4()
+    second = store.claim(
+        worker_b,
+        lease_duration_seconds=30,
+        now=t0 + timedelta(seconds=60),
+    )
+    assert second is not None
+    assert second.fence == first.fence + 1
+    # Il claim non azzera partial_text: il nuovo worker vede il testo del vecchio.
+    assert second.run.partial_text == "parziale-A"
+    # Il nuovo worker può proseguire e finalizzare.
+    ok_partial = store.save_partial(
+        run_id=run.id,
+        worker_id=worker_b,
+        fence=second.fence,
+        partial_text="parziale-A + coda-B",
+        now=t0 + timedelta(seconds=61),
+    )
+    assert ok_partial is True
+    ok_final = store.finalize(
+        run_id=run.id,
+        worker_id=worker_b,
+        fence=second.fence,
+        state=RunState.COMPLETED,
+        finish_reason="stop",
+        partial_text="parziale-A + coda-B",
+        prompt_tokens=None,
+        completion_tokens=None,
+        eval_duration_ns=None,
+        now=t0 + timedelta(seconds=62),
+    )
+    assert ok_final is True
+    persisted = store.get(_owner.scope, run.id)
+    assert persisted is not None
+    assert persisted.state == RunState.COMPLETED
+    assert persisted.partial_text == "parziale-A + coda-B"
+
+
 def test_worker_id_vuoto_non_bypassa_isolamento(test_databases: DatabaseHandles) -> None:
     """Senza ``app.worker_id`` la policy worker non deve concedere accesso."""
 

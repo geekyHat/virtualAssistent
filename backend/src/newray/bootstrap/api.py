@@ -20,20 +20,23 @@ from newray.interfaces.http.routes.chat import build_router as build_chat_router
 from newray.interfaces.http.routes.conversations import build_router as build_conversations_router
 from newray.interfaces.http.routes.identity import build_router as build_identity_router
 from newray.interfaces.http.routes.profiles import build_router as build_profiles_router
+from newray.interfaces.http.routes.runs import build_router as build_runs_router
 from newray.modules.conversations import ConversationService
 from newray.modules.identity import IdentityService
 from newray.modules.models import ChatModel
 from newray.modules.profiles import ProfileService
-from newray.modules.runs import InlineRunService
+from newray.modules.runs import DurableRunService, InlineRunService, RunLauncher
 
 from .settings import Settings
 from .wiring import (
     build_chat_model,
     build_conversation_service,
+    build_durable_run_service,
     build_identity_service,
     build_model_catalog,
     build_ollama_client,
     build_profile_service,
+    build_run_launcher,
 )
 
 
@@ -46,18 +49,26 @@ def create_app(
     chat_model: ChatModel | None = None,
     *,
     public_origin: str = "http://testserver",
+    durable_run_service: DurableRunService | None = None,
+    run_launcher: RunLauncher | None = None,
 ) -> FastAPI:
     """Applicazione FastAPI attorno ai servizi iniettati.
 
     ``ollama_client`` è il client di egress verso il runtime (B-03): se
     presente viene chiuso in modo ordinato alla dismissione dell'app.
+    ``run_launcher`` (opzionale) viene avviato all'entrata nel lifespan
+    e fermato in modo cooperativo all'uscita.
     """
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if run_launcher is not None:
+            await run_launcher.start()
         try:
             yield
         finally:
+            if run_launcher is not None:
+                await run_launcher.stop(timeout=5.0)
             if ollama_client is not None:
                 await ollama_client.aclose()
 
@@ -67,6 +78,8 @@ def create_app(
     app.state.profile_service = profiles
     if chat_model is not None:
         app.state.inline_run_service = InlineRunService(conversations, profiles, chat_model)
+    if durable_run_service is not None:
+        app.state.durable_run_service = durable_run_service
     return app
 
 
@@ -82,6 +95,7 @@ def _http_app(
     app.include_router(build_conversations_router())
     app.include_router(build_profiles_router())
     app.include_router(build_chat_router())
+    app.include_router(build_runs_router())
     return app
 
 
@@ -115,11 +129,17 @@ def build_app() -> FastAPI:
             app.state.conversation_service = build_conversation_service(engine)
             catalog = build_model_catalog(ollama_client)
             app.state.profile_service = build_profile_service(engine, settings, catalog)
-            app.state.inline_run_service = InlineRunService(
+            chat_model = build_chat_model(ollama_client, settings)
+            inline_run_service = InlineRunService(
                 app.state.conversation_service,
                 app.state.profile_service,
-                build_chat_model(ollama_client, settings),
+                chat_model,
             )
+            app.state.inline_run_service = inline_run_service
+            app.state.durable_run_service = build_durable_run_service(engine, inline_run_service)
+            launcher = build_run_launcher(engine, chat_model, settings)
+            await launcher.start()
+            resources.push_async_callback(launcher.stop, timeout=5.0)
             yield
 
     return _http_app(lifespan, settings.cookie_secure, settings.public_origin)

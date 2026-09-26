@@ -27,6 +27,14 @@ from newray.modules.profiles.adapters.postgres import (
     PostgresProfileRepository,
     PostgresProfileVersionWriter,
 )
+from newray.modules.runs import (
+    ChatModelRunExecutor,
+    DurableRunService,
+    InlineRunService,
+    RunLauncher,
+    Worker,
+)
+from newray.modules.runs.adapters.postgres import PostgresRunStore
 
 from .settings import Settings
 
@@ -99,4 +107,39 @@ def build_profile_service(
         PostgresProfileDefaultsSeeder(engine),
         default_model_name=settings.default_model_name,
         version_writer=PostgresProfileVersionWriter(engine),
+    )
+
+
+def build_durable_run_service(
+    engine: Engine,
+    inline: InlineRunService,
+) -> DurableRunService:
+    """Casi d'uso dei run durevoli su PostgreSQL, ricevuta idempotente scoped."""
+    return DurableRunService(PostgresRunStore(engine), inline)
+
+
+def build_run_launcher(
+    engine: Engine,
+    chat_model: ChatModel,
+    settings: Settings,
+) -> RunLauncher:
+    """Un solo :class:`Worker` per il pilot; ownership esplicita del lifespan.
+
+    Il pilot ha un unico binding generativo attivo (§P-05, ADR 0006), quindi
+    un launcher/worker è sufficiente. Un ampliamento a più binding entrerà
+    quando saranno reintrodotti profili aggiuntivi (post-pilot).
+    """
+    worker = Worker(
+        PostgresRunStore(engine),
+        ChatModelRunExecutor(
+            chat_model,
+            max_wall_seconds=settings.run_max_wall_seconds,
+        ),
+        SystemClock(),
+        lease_duration_seconds=settings.run_lease_duration_seconds,
+        heartbeat_seconds=settings.run_heartbeat_seconds,
+    )
+    return RunLauncher(
+        worker,
+        idle_backoff_seconds=settings.run_idle_backoff_seconds,
     )
