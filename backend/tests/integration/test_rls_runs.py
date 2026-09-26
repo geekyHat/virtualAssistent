@@ -49,6 +49,7 @@ def _run(owner, conversation_id: uuid.UUID, *, key: str, payload_hash: str) -> D
         lease_owner=None,
         lease_until=None,
         fence=0,
+        cancel_requested_at=None,
         created_at=now,
         updated_at=now,
     )

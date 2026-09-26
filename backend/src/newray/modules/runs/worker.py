@@ -32,6 +32,20 @@ class LeaseLost(Exception):
     """Il worker ha perso il lease durante l'esecuzione: fermare subito."""
 
 
+class CancelRequested(Exception):
+    """L'utente ha chiesto lo stop: interrompere l'executor.
+
+    Il worker cattura questa eccezione e finalizza il run con stato
+    ``CANCELLED``. Non è un errore: è la via ordinaria della
+    cancellazione cooperativa (§P-06). ``partial_text`` è l'ultimo
+    testo persistito dal checkpoint prima della richiesta.
+    """
+
+    def __init__(self, message: str, *, partial_text: str = "") -> None:
+        super().__init__(message)
+        self.partial_text = partial_text
+
+
 @dataclass(frozen=True, slots=True)
 class RunOutcome:
     """Esito che il worker consegna al finalize.
@@ -52,11 +66,18 @@ class PartialCheckpoint(Protocol):
     """Persiste testo parziale se il lease è ancora vivo.
 
     L'implementazione lancia :class:`LeaseLost` quando il fence non
-    corrisponde più: l'esecutore deve interrompere subito, senza produrre
-    ulteriore output né ritentare.
+    corrisponde più: l'esecutore deve interrompere subito, senza
+    produrre ulteriore output né ritentare. Solleva :class:`CancelRequested`
+    quando l'utente ha chiesto lo stop: l'esecutore chiude anch'esso,
+    ma il worker finalizza in ``CANCELLED`` (via ordinaria, non errore).
     """
 
-    async def save(self, partial_text: str) -> None: ...
+    async def save(self, delta_text: str, partial_text: str) -> None:
+        """``delta_text`` è il frammento appena prodotto; ``partial_text``
+        è l'accumulato totale che il reducer usa come snapshot iniziale
+        su reconnect (P-06). Entrambi finiscono in un unico evento
+        ``delta`` sotto la stessa transazione dello stato."""
+        ...
 
 
 class RunExecutor(Protocol):
@@ -85,17 +106,32 @@ class _StoreCheckpoint:
         self._worker = worker
         self._claimed = claimed
 
-    async def save(self, partial_text: str) -> None:
+    async def save(self, delta_text: str, partial_text: str) -> None:
         ok = await asyncio.to_thread(
             self._worker._store.save_partial,
             self._claimed.run.id,
             self._claimed.worker_id,
             self._claimed.fence,
             partial_text,
+            delta_text,
             self._worker._clock.now(),
         )
         if not ok:
             raise LeaseLost(f"lease perso su run {self._claimed.run.id}")
+        # Cancellazione cooperativa: dopo il checkpoint del delta,
+        # controlliamo il flag persistito. È una lettura leggera; non
+        # riapre la transazione precedente.
+        cancel = await asyncio.to_thread(
+            self._worker._store.is_cancel_requested,
+            self._claimed.worker_id,
+            self._claimed.run.id,
+            self._claimed.fence,
+        )
+        if cancel:
+            raise CancelRequested(
+                f"cancellazione richiesta su run {self._claimed.run.id}",
+                partial_text=partial_text,
+            )
 
 
 class Worker:
@@ -174,6 +210,14 @@ class Worker:
             except LeaseLost:
                 log.warning("lease perso durante execute su run %s", claimed.run.id)
                 return
+            except CancelRequested as exc:
+                # Via ordinaria della cancellazione: il partial è quello
+                # appena persistito dal checkpoint (portato dall'exc).
+                outcome = RunOutcome(
+                    state=RunState.CANCELLED,
+                    finish_reason="cancelled",
+                    partial_text=exc.partial_text,
+                )
             except Exception as exc:  # noqa: BLE001
                 log.exception("executor ha sollevato su run %s", claimed.run.id)
                 outcome = RunOutcome(

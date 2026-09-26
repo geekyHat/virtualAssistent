@@ -41,6 +41,7 @@ class DurableRun:
     lease_owner: uuid.UUID | None
     lease_until: datetime | None
     fence: int
+    cancel_requested_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -83,6 +84,68 @@ class ClaimedRun:
     worker_id: uuid.UUID
     lease_until: datetime
     fence: int
+
+
+class RunEventType(StrEnum):
+    """Tipi di evento persistiti sull'outbox (P-06).
+
+    ``delta`` è un frammento di testo; ``partial`` è un checkpoint
+    intermedio del testo accumulato (aggregato che il reducer può usare
+    come snapshot iniziale su reconnect). Gli stati terminali coincidono
+    con :class:`RunState`. ``cancel_requested`` marca l'istante in cui
+    l'utente ha chiesto lo stop (non è terminale: l'esito arriva dopo).
+    """
+
+    DELTA = "delta"
+    PARTIAL = "partial"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+    CANCEL_REQUESTED = "cancel_requested"
+
+
+TERMINAL_EVENT_TYPES = frozenset(
+    {
+        RunEventType.COMPLETED,
+        RunEventType.FAILED,
+        RunEventType.CANCELLED,
+        RunEventType.INTERRUPTED,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RunEvent:
+    """Evento persistito nell'outbox (P-06, §19.3).
+
+    ``sequence`` è monotona per run: il client la usa come cursore di
+    replay (``Last-Event-ID`` o query ``after``). ``payload`` è un dict
+    JSON-serializzabile con dettagli specifici del tipo.
+    """
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    organization_id: uuid.UUID
+    owner_id: uuid.UUID
+    sequence: int
+    event_type: RunEventType
+    payload: Mapping[str, object]
+    created_at: datetime
+
+
+class RunEventReader(Protocol):
+    """Lettura degli eventi di un run per il client."""
+
+    def list_events_after(
+        self,
+        scope: Scope,
+        run_id: uuid.UUID,
+        after_sequence: int,
+        limit: int,
+    ) -> list[RunEvent]:
+        """Eventi con ``sequence > after_sequence``, ordinati crescenti."""
+        ...
 
 
 class RunStore(Protocol):
@@ -131,9 +194,16 @@ class RunStore(Protocol):
         worker_id: uuid.UUID,
         fence: int,
         partial_text: str,
+        delta_text: str,
         now: datetime,
     ) -> bool:
-        """Checkpoint incrementale del testo parziale (solo lease vivo)."""
+        """Checkpoint del parziale + evento ``delta`` atomico (P-06).
+
+        Scrive nella stessa transazione l'aggiornamento di
+        ``runs.partial_text`` e un nuovo evento nella outbox
+        (``event_type='delta'``, ``payload={"text": delta_text}``).
+        Ritorna ``False`` su fence obsoleto senza scrivere alcun evento.
+        """
         ...
 
     def finalize(
@@ -149,9 +219,45 @@ class RunStore(Protocol):
         eval_duration_ns: int | None,
         now: datetime,
     ) -> bool:
-        """Chiude il run in stato terminale se il lease è ancora valido.
+        """Chiude il run in stato terminale + evento terminale (P-06).
 
         Ritorna ``False`` su fence obsoleto o lease già liberato; il worker
-        non deve trattare quel caso come successo (§P-05).
+        non deve trattare quel caso come successo (§P-05). Su successo
+        scrive un evento della outbox con ``event_type`` uguale allo stato
+        terminale e payload contenente la contabilizzazione.
+        """
+        ...
+
+    def is_cancel_requested(
+        self,
+        worker_id: uuid.UUID,
+        run_id: uuid.UUID,
+        fence: int,
+    ) -> bool:
+        """True se lo stop è stato richiesto sotto il fence del worker."""
+        ...
+
+    def list_events_after(
+        self,
+        scope: Scope,
+        run_id: uuid.UUID,
+        after_sequence: int,
+        limit: int,
+    ) -> list[RunEvent]: ...
+
+    def request_cancel(
+        self,
+        scope: Scope,
+        run_id: uuid.UUID,
+        now: datetime,
+    ) -> DurableRun | None:
+        """Marca la richiesta di cancellazione (idempotente).
+
+        Se il run è già terminale, non modifica nulla e restituisce lo
+        stato corrente. Se ``cancel_requested_at`` è già valorizzato,
+        restituisce il run senza scritture (idempotenza). Altrimenti
+        valorizza il campo e scrive un evento ``cancel_requested``
+        nella stessa transazione. Ritorna ``None`` se il run non esiste
+        nello scope.
         """
         ...

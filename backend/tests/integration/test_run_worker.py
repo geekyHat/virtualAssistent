@@ -54,6 +54,7 @@ def _make_run(owner, conversation_id: uuid.UUID, key: str) -> DurableRun:
         lease_owner=None,
         lease_until=None,
         fence=0,
+        cancel_requested_at=None,
         created_at=now,
         updated_at=now,
     )
@@ -153,6 +154,7 @@ def test_lease_scaduto_riclaimabile_e_vecchio_worker_non_finalizza(enqueued_run)
         worker_id=worker_old,
         fence=1,
         partial_text="postumo",
+        delta_text="postumo",
         now=t1,
     )
     assert ok_partial is False
@@ -206,6 +208,7 @@ def test_partial_sopravvive_al_riclaim_dopo_lease_scaduto(enqueued_run) -> None:
         worker_id=worker_a,
         fence=first.fence,
         partial_text="parziale-A",
+        delta_text="parziale-A",
         now=t0 + timedelta(seconds=1),
     )
     assert ok is True
@@ -227,6 +230,7 @@ def test_partial_sopravvive_al_riclaim_dopo_lease_scaduto(enqueued_run) -> None:
         worker_id=worker_b,
         fence=second.fence,
         partial_text="parziale-A + coda-B",
+        delta_text=" + coda-B",
         now=t0 + timedelta(seconds=61),
     )
     assert ok_partial is True

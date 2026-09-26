@@ -13,7 +13,14 @@ from sqlalchemy.engine import Connection, Engine, Row
 from newray.kernel.errors import Conflict, NotFound
 from newray.kernel.identity import Scope
 
-from ..durable import ClaimedRun, DurableRun, RunState, thaw_json
+from ..durable import (
+    ClaimedRun,
+    DurableRun,
+    RunEvent,
+    RunEventType,
+    RunState,
+    thaw_json,
+)
 
 
 def _scope(conn: Connection, scope: Scope) -> None:
@@ -54,6 +61,7 @@ def _run(row: Row[Any]) -> DurableRun:
         lease_owner=row.lease_owner,
         lease_until=row.lease_until,
         fence=row.fence,
+        cancel_requested_at=row.cancel_requested_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -62,8 +70,64 @@ def _run(row: Row[Any]) -> DurableRun:
 _COLUMNS = (
     "id, conversation_id, organization_id, owner_id, idempotency_key, payload_hash, "
     "state, snapshot, partial_text, finish_reason, prompt_tokens, completion_tokens, "
-    "eval_duration_ns, lease_owner, lease_until, fence, created_at, updated_at"
+    "eval_duration_ns, lease_owner, lease_until, fence, cancel_requested_at, "
+    "created_at, updated_at"
 )
+
+
+def _next_sequence(conn: Connection, run_id: uuid.UUID) -> int:
+    """Prossimo numero di sequence per il run (partenza da 1).
+
+    ``run_events_run_sequence`` è UNIQUE: se due writer provano lo
+    stesso valore, uno solo passa e l'altro rilancia — condizione già
+    esclusa dal fence, che ammette un unico worker per generazione.
+    """
+    row = conn.execute(
+        text("SELECT COALESCE(MAX(sequence), 0) AS s FROM run_events WHERE run_id = :id"),
+        {"id": run_id},
+    ).one()
+    return int(row.s) + 1
+
+
+def _insert_event(
+    conn: Connection,
+    *,
+    run_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    event_type: RunEventType,
+    payload: dict[str, object],
+    now: datetime,
+) -> RunEvent:
+    sequence = _next_sequence(conn, run_id)
+    event_id = uuid.uuid4()
+    conn.execute(
+        text(
+            "INSERT INTO run_events "
+            "(id, run_id, organization_id, owner_id, sequence, event_type, payload, created_at) "
+            "VALUES (:id, :run, :org, :owner, :seq, :type, CAST(:payload AS jsonb), :now)"
+        ),
+        {
+            "id": event_id,
+            "run": run_id,
+            "org": organization_id,
+            "owner": owner_id,
+            "seq": sequence,
+            "type": event_type.value,
+            "payload": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            "now": now,
+        },
+    )
+    return RunEvent(
+        id=event_id,
+        run_id=run_id,
+        organization_id=organization_id,
+        owner_id=owner_id,
+        sequence=sequence,
+        event_type=event_type,
+        payload=payload,
+        created_at=now,
+    )
 
 
 class PostgresRunStore:
@@ -223,6 +287,7 @@ class PostgresRunStore:
         worker_id: uuid.UUID,
         fence: int,
         partial_text: str,
+        delta_text: str,
         now: datetime,
     ) -> bool:
         with self._engine.begin() as conn:
@@ -231,7 +296,8 @@ class PostgresRunStore:
                 text(
                     "UPDATE runs SET partial_text = :partial, updated_at = :now "
                     "WHERE id = :id AND lease_owner = :worker "
-                    "AND fence = :fence AND state = 'running'"
+                    "AND fence = :fence AND state = 'running' "
+                    "RETURNING organization_id, owner_id"
                 ),
                 {
                     "id": run_id,
@@ -240,8 +306,19 @@ class PostgresRunStore:
                     "partial": partial_text,
                     "now": now,
                 },
+            ).first()
+            if result is None:
+                return False
+            _insert_event(
+                conn,
+                run_id=run_id,
+                organization_id=result.organization_id,
+                owner_id=result.owner_id,
+                event_type=RunEventType.DELTA,
+                payload={"text": delta_text, "partial_text": partial_text},
+                now=now,
             )
-            return result.rowcount == 1
+            return True
 
     def finalize(
         self,
@@ -273,7 +350,8 @@ class PostgresRunStore:
                     "lease_until = NULL, "
                     "updated_at = :now "
                     "WHERE id = :id AND lease_owner = :worker "
-                    "AND fence = :fence AND state = 'running'"
+                    "AND fence = :fence AND state = 'running' "
+                    "RETURNING organization_id, owner_id"
                 ),
                 {
                     "id": run_id,
@@ -287,8 +365,137 @@ class PostgresRunStore:
                     "eval_duration_ns": eval_duration_ns,
                     "now": now,
                 },
+            ).first()
+            if result is None:
+                return False
+            terminal_event = _terminal_event_type(state)
+            _insert_event(
+                conn,
+                run_id=run_id,
+                organization_id=result.organization_id,
+                owner_id=result.owner_id,
+                event_type=terminal_event,
+                payload={
+                    "finish_reason": finish_reason,
+                    "partial_text": partial_text,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "eval_duration_ns": eval_duration_ns,
+                },
+                now=now,
             )
-            return result.rowcount == 1
+            return True
+
+    def list_events_after(
+        self,
+        scope: Scope,
+        run_id: uuid.UUID,
+        after_sequence: int,
+        limit: int,
+    ) -> list[RunEvent]:
+        if limit <= 0 or limit > 1000:
+            raise ValueError("limit fuori dai limiti (1..1000)")
+        with self._engine.connect() as conn:
+            _scope(conn, scope)
+            rows = conn.execute(
+                text(
+                    "SELECT id, run_id, organization_id, owner_id, sequence, "
+                    "event_type, payload, created_at FROM run_events "
+                    "WHERE run_id = :run AND sequence > :after "
+                    "ORDER BY sequence ASC LIMIT :limit"
+                ),
+                {"run": run_id, "after": after_sequence, "limit": limit},
+            ).all()
+            return [
+                RunEvent(
+                    id=r.id,
+                    run_id=r.run_id,
+                    organization_id=r.organization_id,
+                    owner_id=r.owner_id,
+                    sequence=int(r.sequence),
+                    event_type=RunEventType(r.event_type),
+                    payload=dict(r.payload),
+                    created_at=r.created_at,
+                )
+                for r in rows
+            ]
+
+    def is_cancel_requested(
+        self,
+        worker_id: uuid.UUID,
+        run_id: uuid.UUID,
+        fence: int,
+    ) -> bool:
+        """True se la richiesta di stop è arrivata mentre il lease è vivo.
+
+        Usato dal worker fra un delta e l'altro per interrompere la
+        generazione senza attendere la conclusione naturale dello stream.
+        Restituisce False se il fence non corrisponde (il worker perderà
+        comunque il finalize tramite ``LeaseLost``).
+        """
+        with self._engine.connect() as conn:
+            _worker(conn, worker_id)
+            row = conn.execute(
+                text(
+                    "SELECT cancel_requested_at FROM runs "
+                    "WHERE id = :id AND fence = :fence AND state = 'running'"
+                ),
+                {"id": run_id, "fence": fence},
+            ).first()
+            if row is None:
+                return False
+            return row.cancel_requested_at is not None
+
+    def request_cancel(
+        self,
+        scope: Scope,
+        run_id: uuid.UUID,
+        now: datetime,
+    ) -> DurableRun | None:
+        with self._engine.begin() as conn:
+            _scope(conn, scope)
+            row = conn.execute(
+                text("SELECT " + _COLUMNS + " FROM runs WHERE id = :id FOR UPDATE"),
+                {"id": run_id},
+            ).first()
+            if row is None:
+                return None
+            run = _run(row)
+            if run.state in _TERMINAL_STATES:
+                # Idempotenza: già terminale, restituisci lo stato senza
+                # scrivere né emettere evento.
+                return run
+            if run.cancel_requested_at is not None:
+                # Già chiesto: idempotente, nessuna nuova scrittura.
+                return run
+            updated = conn.execute(
+                text(
+                    "UPDATE runs SET cancel_requested_at = :now, updated_at = :now "
+                    "WHERE id = :id RETURNING " + _COLUMNS
+                ),
+                {"id": run_id, "now": now},
+            ).one()
+            _insert_event(
+                conn,
+                run_id=run_id,
+                organization_id=run.organization_id,
+                owner_id=run.owner_id,
+                event_type=RunEventType.CANCEL_REQUESTED,
+                payload={},
+                now=now,
+            )
+            return _run(updated)
+
+
+def _terminal_event_type(state: RunState) -> RunEventType:
+    """Mappa stato terminale → tipo evento (§P-06)."""
+    mapping = {
+        RunState.COMPLETED: RunEventType.COMPLETED,
+        RunState.FAILED: RunEventType.FAILED,
+        RunState.CANCELLED: RunEventType.CANCELLED,
+        RunState.INTERRUPTED: RunEventType.INTERRUPTED,
+    }
+    return mapping[state]
 
 
 _TERMINAL_STATES = frozenset(

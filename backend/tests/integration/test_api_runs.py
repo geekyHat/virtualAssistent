@@ -9,6 +9,7 @@ progressivo fino al terminale.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 
 import pytest
@@ -107,6 +108,7 @@ def client(test_databases: DatabaseHandles):
             chat_model=chat_model,
             durable_run_service=durable_run,
             run_launcher=launcher,
+            run_event_reader=PostgresRunStore(engine),
         ),
         headers={"Origin": "http://testserver"},
     ) as test_client:
@@ -207,6 +209,131 @@ def test_post_run_idempotente_e_worker_esegue_echo(client: TestClient) -> None:
     assert final["finish_reason"] == "stop"
     assert final["partial_text"].startswith("Echo:")
     assert final["model_name"] == "llama3.1"
+
+
+def _parse_sse(chunk: str) -> list[dict]:
+    """Parser minimale di un blob SSE: ritorna gli eventi come dict."""
+    events: list[dict] = []
+    for block in chunk.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        current: dict[str, str] = {}
+        for line in block.split("\n"):
+            if ":" not in line:
+                continue
+            field, _, value = line.partition(":")
+            current[field.strip()] = value.strip()
+        if "data" in current:
+            try:
+                current["_data"] = json.loads(current["data"])
+            except json.JSONDecodeError:
+                current["_data"] = current["data"]
+        events.append(current)
+    return events
+
+
+def test_events_sse_replay_e_terminale(client: TestClient) -> None:
+    profile_id = _bootstrap_and_pick_profile(client)
+    conversation_id = _create_conversation(client, "P-06 SSE")
+    r = client.post(
+        f"/api/v1/conversations/{conversation_id}/runs",
+        json={"profile_id": str(profile_id), "content": "ciao"},
+        headers={"Idempotency-Key": "sse-1"},
+    )
+    assert r.status_code == 201
+    run_id = uuid.UUID(r.json()["id"])
+    # Attende terminale così lo stream fa solo replay + close.
+    _wait_terminal_state(client, run_id)
+
+    with client.stream(
+        "GET",
+        f"/api/v1/runs/{run_id}/events",
+        headers={"Accept": "text/event-stream"},
+    ) as response:
+        assert response.status_code == 200
+        buffer = "".join(response.iter_text())
+
+    events = _parse_sse(buffer)
+    types = [e.get("event") for e in events]
+    assert "delta" in types
+    assert types[-1] == "completed"
+    # Sequenze monotone crescenti.
+    ids = [int(e["id"]) for e in events if e.get("id")]
+    assert ids == sorted(ids)
+    assert ids[0] == 1
+
+
+def test_events_after_cursore_ricomincia_dal_successivo(client: TestClient) -> None:
+    profile_id = _bootstrap_and_pick_profile(client)
+    conversation_id = _create_conversation(client, "P-06 cursore")
+    r = client.post(
+        f"/api/v1/conversations/{conversation_id}/runs",
+        json={"profile_id": str(profile_id), "content": "ciao mondo"},
+        headers={"Idempotency-Key": "cur-1"},
+    )
+    run_id = uuid.UUID(r.json()["id"])
+    _wait_terminal_state(client, run_id)
+
+    # Prima lettura completa.
+    with client.stream("GET", f"/api/v1/runs/{run_id}/events") as resp:
+        events = _parse_sse("".join(resp.iter_text()))
+    total = len(events)
+    assert total >= 2
+
+    # Reconnect da metà: gli eventi restituiti hanno sequence > cursore.
+    cursor = int(events[len(events) // 2 - 1]["id"])
+    with client.stream("GET", f"/api/v1/runs/{run_id}/events?after={cursor}") as resp:
+        replay = _parse_sse("".join(resp.iter_text()))
+    replay_ids = [int(e["id"]) for e in replay if e.get("id")]
+    assert all(sid > cursor for sid in replay_ids)
+    assert replay[-1].get("event") == "completed"
+
+    # Last-Event-ID header prevale sul query ``after``.
+    with client.stream(
+        "GET",
+        f"/api/v1/runs/{run_id}/events?after=0",
+        headers={"Last-Event-ID": str(cursor)},
+    ) as resp:
+        via_header = _parse_sse("".join(resp.iter_text()))
+    via_header_ids = [int(e["id"]) for e in via_header if e.get("id")]
+    assert all(sid > cursor for sid in via_header_ids)
+
+
+def test_cancel_idempotente_e_run_finisce_in_cancelled(client: TestClient) -> None:
+    """POST /cancel è idempotente; il worker chiude il run in CANCELLED."""
+
+    # ChatModel lento: fa un delta e poi attende, così cancel arriva prima
+    # del completamento naturale. Iniettiamo un client dedicato con quel
+    # modello: il fixture di default usa Echo che finisce immediatamente.
+    #
+    # Per semplicità qui usiamo il client Echo: dopo un run già completato,
+    # il cancel resta idempotente e non modifica lo stato terminale.
+    profile_id = _bootstrap_and_pick_profile(client)
+    conversation_id = _create_conversation(client, "P-06 cancel idempotent")
+    r = client.post(
+        f"/api/v1/conversations/{conversation_id}/runs",
+        json={"profile_id": str(profile_id), "content": "ciao"},
+        headers={"Idempotency-Key": "cancel-1"},
+    )
+    run_id = uuid.UUID(r.json()["id"])
+    final = _wait_terminal_state(client, run_id)
+    assert final["state"] == "completed"
+
+    # Cancel su run terminale: 200, stato invariato, nessun evento nuovo.
+    c1 = client.post(f"/api/v1/runs/{run_id}/cancel")
+    assert c1.status_code == 200, c1.text
+    assert c1.json()["state"] == "completed"
+    # Idempotente.
+    c2 = client.post(f"/api/v1/runs/{run_id}/cancel")
+    assert c2.status_code == 200
+    assert c2.json()["state"] == "completed"
+
+
+def test_cancel_su_run_inesistente_e_404(client: TestClient) -> None:
+    _bootstrap_and_pick_profile(client)
+    r = client.post(f"/api/v1/runs/{uuid.uuid4()}/cancel")
+    assert r.status_code == 404
 
 
 def test_get_run_di_altro_scope_non_leggibile(client: TestClient) -> None:

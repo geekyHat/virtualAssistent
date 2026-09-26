@@ -25,7 +25,12 @@ from newray.modules.conversations import ConversationService
 from newray.modules.identity import IdentityService
 from newray.modules.models import ChatModel
 from newray.modules.profiles import ProfileService
-from newray.modules.runs import DurableRunService, InlineRunService, RunLauncher
+from newray.modules.runs import (
+    DurableRunService,
+    InlineRunService,
+    RunEventReader,
+    RunLauncher,
+)
 
 from .settings import Settings
 from .wiring import (
@@ -36,6 +41,7 @@ from .wiring import (
     build_model_catalog,
     build_ollama_client,
     build_profile_service,
+    build_run_event_reader,
     build_run_launcher,
 )
 
@@ -51,6 +57,7 @@ def create_app(
     public_origin: str = "http://testserver",
     durable_run_service: DurableRunService | None = None,
     run_launcher: RunLauncher | None = None,
+    run_event_reader: RunEventReader | None = None,
 ) -> FastAPI:
     """Applicazione FastAPI attorno ai servizi iniettati.
 
@@ -80,6 +87,8 @@ def create_app(
         app.state.inline_run_service = InlineRunService(conversations, profiles, chat_model)
     if durable_run_service is not None:
         app.state.durable_run_service = durable_run_service
+    if run_event_reader is not None:
+        app.state.run_event_reader = run_event_reader
     return app
 
 
@@ -137,6 +146,7 @@ def build_app() -> FastAPI:
             )
             app.state.inline_run_service = inline_run_service
             app.state.durable_run_service = build_durable_run_service(engine, inline_run_service)
+            app.state.run_event_reader = build_run_event_reader(engine)
             launcher = build_run_launcher(engine, chat_model, settings)
             await launcher.start()
             resources.push_async_callback(launcher.stop, timeout=5.0)

@@ -42,5 +42,6 @@ class RunSnapshotDTO(BaseModel):
     model_name: str | None
     digest: str | None
     context_truncated: bool | None
+    cancel_requested_at: datetime | None
     created_at: datetime
     updated_at: datetime

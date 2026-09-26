@@ -37,6 +37,7 @@ def _make_run() -> DurableRun:
         lease_owner=None,
         lease_until=None,
         fence=0,
+        cancel_requested_at=None,
         created_at=now,
         updated_at=now,
     )

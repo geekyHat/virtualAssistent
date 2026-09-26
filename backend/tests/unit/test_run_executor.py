@@ -26,16 +26,16 @@ from newray.modules.runs.worker import PartialCheckpoint
 
 
 class _NullCheckpoint:
-    async def save(self, partial_text: str) -> None:  # noqa: ARG002
+    async def save(self, delta_text: str, partial_text: str) -> None:  # noqa: ARG002
         return None
 
 
 @dataclass
 class _RecordingCheckpoint(PartialCheckpoint):
-    saved: list[str] = field(default_factory=list)
+    saved: list[tuple[str, str]] = field(default_factory=list)
 
-    async def save(self, partial_text: str) -> None:
-        self.saved.append(partial_text)
+    async def save(self, delta_text: str, partial_text: str) -> None:
+        self.saved.append((delta_text, partial_text))
 
 
 def _snapshot(text: str = "ciao") -> dict[str, object]:
@@ -67,6 +67,7 @@ def _run(snapshot: dict[str, object] | None = None, partial: str = "") -> Durabl
         lease_owner=uuid.uuid4(),
         lease_until=now,
         fence=1,
+        cancel_requested_at=None,
         created_at=now,
         updated_at=now,
     )
@@ -108,7 +109,7 @@ def test_completa_run_con_completion_dello_stream() -> None:
     assert outcome.completion_tokens == 7
     assert outcome.eval_duration_ns == 1_000_000
     # Ogni delta produce un checkpoint incrementale.
-    assert checkpoint.saved == ["ciao ", "ciao mondo"]
+    assert checkpoint.saved == [("ciao ", "ciao "), ("mondo", "ciao mondo")]
     # La ChatRequest è stata ricostruita dallo snapshot.
     assert model.seen_request is not None
     assert model.seen_request.model == "gemma:test"
@@ -136,7 +137,7 @@ def test_resume_da_partial_precedente() -> None:
     outcome = asyncio.run(executor.execute(_run(partial="già scritto"), checkpoint))
     assert outcome.state == RunState.COMPLETED
     assert outcome.partial_text == "già scritto e continua"
-    assert checkpoint.saved == ["già scritto e continua"]
+    assert checkpoint.saved == [(" e continua", "già scritto e continua")]
 
 
 def test_deadline_wall_scaduta_produce_interrupted_con_partial() -> None:
@@ -189,7 +190,7 @@ def test_checkpoint_leaselost_si_propaga_al_worker() -> None:
             yield ContentDelta(text="x")
 
     class HostileCheckpoint:
-        async def save(self, partial_text: str) -> None:  # noqa: ARG002
+        async def save(self, delta_text: str, partial_text: str) -> None:  # noqa: ARG002
             raise LeaseLost("fence bumped")
 
     executor = ChatModelRunExecutor(Model())

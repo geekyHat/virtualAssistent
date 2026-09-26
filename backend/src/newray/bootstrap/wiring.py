@@ -118,6 +118,11 @@ def build_durable_run_service(
     return DurableRunService(PostgresRunStore(engine), inline)
 
 
+def build_run_event_reader(engine: Engine) -> PostgresRunStore:
+    """Lettore della outbox eventi (P-06): condivide l'engine con lo store."""
+    return PostgresRunStore(engine)
+
+
 def build_run_launcher(
     engine: Engine,
     chat_model: ChatModel,

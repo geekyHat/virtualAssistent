@@ -77,9 +77,10 @@ class ChatModelRunExecutor:
                 async for event in stream:
                     if isinstance(event, ContentDelta):
                         chunks.append(event.text)
-                        # Il checkpoint può sollevare LeaseLost: si
-                        # propaga fino al worker senza finalize.
-                        await checkpoint.save("".join(chunks))
+                        # Il checkpoint può sollevare LeaseLost o
+                        # CancelRequested: si propagano fino al worker
+                        # senza finalize/con finalize in CANCELLED.
+                        await checkpoint.save(event.text, "".join(chunks))
                     elif isinstance(event, Completion):
                         completion = event
                         break

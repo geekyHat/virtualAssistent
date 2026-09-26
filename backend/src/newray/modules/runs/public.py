@@ -12,11 +12,21 @@ from newray.modules.runs.domain import (
     InlineRunEvent,
     PreparedInlineRun,
 )
-from newray.modules.runs.durable import ClaimedRun, DurableRun, RunState, RunStore
+from newray.modules.runs.durable import (
+    TERMINAL_EVENT_TYPES,
+    ClaimedRun,
+    DurableRun,
+    RunEvent,
+    RunEventReader,
+    RunEventType,
+    RunState,
+    RunStore,
+)
 from newray.modules.runs.durable_application import DurableRunService
 from newray.modules.runs.executor import ChatModelRunExecutor
 from newray.modules.runs.launcher import RunLauncher
 from newray.modules.runs.worker import (
+    CancelRequested,
     LeaseLost,
     PartialCheckpoint,
     RunExecutor,
@@ -33,9 +43,13 @@ __all__ = [
     "InlineRunEvent",
     "InlineRunService",
     "PreparedInlineRun",
+    "CancelRequested",
     "ChatModelRunExecutor",
     "ClaimedRun",
     "DurableRun",
+    "RunEvent",
+    "RunEventReader",
+    "RunEventType",
     "RunState",
     "RunStore",
     "DurableRunService",
@@ -44,5 +58,6 @@ __all__ = [
     "RunExecutor",
     "RunLauncher",
     "RunOutcome",
+    "TERMINAL_EVENT_TYPES",
     "Worker",
 ]

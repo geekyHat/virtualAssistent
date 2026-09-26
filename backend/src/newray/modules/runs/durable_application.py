@@ -104,6 +104,7 @@ class DurableRunService:
             lease_owner=None,
             lease_until=None,
             fence=0,
+            cancel_requested_at=None,
             created_at=now,
             updated_at=now,
         )
@@ -111,6 +112,28 @@ class DurableRunService:
 
     async def get(self, principal: Principal, run_id: uuid.UUID) -> DurableRun:
         run = await asyncio.to_thread(self._store.get, principal.scope, run_id)
+        if run is None:
+            raise NotFound("run non trovato")
+        return run
+
+    async def cancel(
+        self,
+        principal: Principal,
+        run_id: uuid.UUID,
+    ) -> DurableRun:
+        """Richiede stop (idempotente).
+
+        Il worker rileva la richiesta al prossimo checkpoint del parziale
+        e finalizza con stato ``CANCELLED``. La chiamata risponde subito
+        con lo snapshot corrente: l'utente vede la richiesta prima
+        dell'esito autorevole (§P-06).
+        """
+        run = await asyncio.to_thread(
+            self._store.request_cancel,
+            principal.scope,
+            run_id,
+            datetime.now(UTC),
+        )
         if run is None:
             raise NotFound("run non trovato")
         return run

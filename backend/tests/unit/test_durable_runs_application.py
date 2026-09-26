@@ -45,6 +45,43 @@ class FakeStore:
             None,
         )
 
+    def request_cancel(self, scope, run_id, now):
+        for key, run in self.by_key.items():
+            owner, _, _ = key
+            if owner != scope or run.id != run_id:
+                continue
+            # Idempotenza semplice: già cancel_requested → invariato.
+            if run.cancel_requested_at is not None:
+                return run
+            updated = _replace_cancel(run, now)
+            self.by_key[key] = updated
+            return updated
+        return None
+
+
+def _replace_cancel(run: DurableRun, at) -> DurableRun:
+    return DurableRun(
+        id=run.id,
+        conversation_id=run.conversation_id,
+        organization_id=run.organization_id,
+        owner_id=run.owner_id,
+        idempotency_key=run.idempotency_key,
+        payload_hash=run.payload_hash,
+        state=run.state,
+        snapshot=dict(run.snapshot),
+        partial_text=run.partial_text,
+        finish_reason=run.finish_reason,
+        prompt_tokens=run.prompt_tokens,
+        completion_tokens=run.completion_tokens,
+        eval_duration_ns=run.eval_duration_ns,
+        lease_owner=run.lease_owner,
+        lease_until=run.lease_until,
+        fence=run.fence,
+        cancel_requested_at=at,
+        created_at=run.created_at,
+        updated_at=at,
+    )
+
 
 class FakeInline:
     def __init__(self) -> None:
@@ -115,5 +152,27 @@ def test_creazione_replay_conflitto_e_scope() -> None:
             await service.create(principal, conversation_id, profile_id, "Diverso", "key-1")
         with pytest.raises(NotFound):
             await service.get(other, first.id)
+
+    asyncio.run(scenario())
+
+
+def test_cancel_idempotente_e_scope() -> None:
+    async def scenario() -> None:
+        principal = Principal(uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), Role.OWNER)
+        other = Principal(uuid.uuid4(), principal.organization_id, uuid.uuid4(), Role.MEMBER)
+        conversation_id = uuid.uuid4()
+        profile_id = uuid.uuid4()
+        store = FakeStore()
+        service = DurableRunService(store, FakeInline())  # type: ignore[arg-type]
+
+        run = await service.create(principal, conversation_id, profile_id, "Ciao", "k")
+        first = await service.cancel(principal, run.id)
+        assert first.cancel_requested_at is not None
+        # Idempotenza: seconda cancel non aggiorna il timestamp.
+        again = await service.cancel(principal, run.id)
+        assert again.cancel_requested_at == first.cancel_requested_at
+        # Scope diverso: NotFound.
+        with pytest.raises(NotFound):
+            await service.cancel(other, run.id)
 
     asyncio.run(scenario())

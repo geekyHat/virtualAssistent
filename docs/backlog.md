@@ -542,7 +542,7 @@ resta lì; nel pilot un run è una singola generazione.
 
 ### P-06 — Eventi durevoli, stop e migrazione della chat browser
 
-- **Stato / priorità:** Da fare / P0.
+- **Stato / priorità:** In corso (backend completato 26/09/2026) / P0.
 - **Proprietario:** runs/events; web/features/chat e conversations.
 - **Dipendenze:** P-04, P-05.
 - **Contratto e risultato:** `GET /runs/{id}/events`, snapshot e
@@ -563,6 +563,103 @@ resta lì; nel pilot un run è una singola generazione.
   Kill worker e stop durante inference liberano risorse o rendono l'incertezza visibile.
 - **Limiti / recupero:** nessun retry automatico di invii incerti. Il roll-out
   preserva lo storico inline; rollback client non deve creare due run per invio.
+
+**Slice backend P-06 (26/09/2026).** Backend completato; la migrazione
+del composer web alla route plurale resta come slice separata.
+
+- **Migrazione `0011_run_events_and_cancel`:** aggiunge
+  `runs.cancel_requested_at` (nullable, GRANT UPDATE al ruolo
+  applicativo) e la tabella `run_events` (outbox: id, run_id UUID FK
+  ON DELETE CASCADE, organization_id, owner_id, sequence BIGINT ≥ 1,
+  event_type TEXT nel set fisso, payload JSONB, created_at). UNIQUE
+  (run_id, sequence). RLS FORCE con doppia policy
+  `run_events_isolation` (per principal utente) + `run_events_worker_access`
+  (worker via `app.worker_id`). Gli eventi sono immutabili: solo
+  SELECT/INSERT concessi al ruolo applicativo.
+- **`PostgresRunStore`:** ogni scrittura di stato del run che deve
+  emettere evento (save_partial, finalize, request_cancel) è atomica
+  con l'INSERT nella outbox e usa `RETURNING organization_id, owner_id`
+  per popolare correttamente i campi di scope dell'evento. La
+  numerazione di `sequence` è calcolata con `COALESCE(MAX(sequence),0)+1`
+  sotto la stessa transazione, protetta dal fence (un solo worker per
+  generazione) e dal `UNIQUE (run_id, sequence)`. Nuovi metodi:
+  `is_cancel_requested(worker_id, run_id, fence)` per il checkpoint,
+  `list_events_after(scope, run_id, after_sequence, limit)` per il
+  lettore SSE, `request_cancel(scope, run_id, now)` idempotente (già
+  terminale → invariato; già richiesto → invariato).
+- **`DurableRunService.cancel(principal, run_id)`:** proxy sopra
+  `request_cancel` con `NotFound` in caso di scope estraneo. Nessun
+  effetto sui run già terminali.
+- **Worker (`worker.py`):** nuova eccezione `CancelRequested` (via
+  ordinaria, non errore); `_StoreCheckpoint.save(delta_text, partial_text)`
+  dopo il write del delta interroga `is_cancel_requested` sotto fence e
+  solleva `CancelRequested` con il partial appena scritto. Il worker
+  cattura l'eccezione e finalizza con `RunState.CANCELLED`
+  (finish_reason `"cancelled"`), atomicamente con l'evento `cancelled`.
+  Il partial persistito prima della richiesta è preservato.
+- **Route pubbliche (`interfaces/http/routes/runs.py`):**
+  - `POST /api/v1/runs/{id}/cancel` (200, snapshot con
+    `cancel_requested_at` popolato; idempotente; 404 su scope estraneo o
+    id inesistente).
+  - `GET /api/v1/runs/{id}/events` — stream SSE con envelope §19.3
+    (`id: <sequence>\nevent: <type>\ndata: <json>\n\n`). Cursore
+    `after` come query param o `Last-Event-ID` header (l'header
+    prevale sul query). Se il run è già terminale al momento della
+    richiesta, lo stream fa solo replay e chiude dopo il primo batch
+    che non produce righe nuove. Reducer minimale server-side:
+    ordinamento crescente per sequence, batch da 200 eventi, backoff
+    100ms tra un poll e l'altro. Autorizzazione risolta prima dello
+    stream (404 uniforme fuori scope).
+- **DTO `RunSnapshotDTO`:** aggiunto campo `cancel_requested_at`.
+- **Wiring:** `wiring.py` aggiunge `build_run_event_reader(engine)`;
+  `bootstrap/api.py` espone `run_event_reader` opzionale a `create_app`
+  e lo compone in `build_app` sullo stesso engine PostgreSQL condiviso.
+  `contracts/openapi.json` e `web/.../api.d.ts` rigenerati.
+
+Prove aggiunte:
+
+- Unit `tests/unit/test_worker_loop.py` (+1 test):
+  `test_cancel_richiesto_produce_finalize_cancelled` — un executor
+  cancellabile riceve `CancelRequested` al secondo checkpoint, il
+  worker finalizza `CANCELLED` conservando il partial persistito.
+- Unit `tests/unit/test_durable_runs_application.py` (+1 test):
+  `test_cancel_idempotente_e_scope` — doppia cancel ritorna lo stesso
+  `cancel_requested_at`, scope estraneo → `NotFound`.
+- Integration `tests/integration/test_rls_run_events.py` (1 nuovo file
+  con 1 test): sequence monotona per un run, cursore rispettato
+  (`list_events_after(after=2)` ritorna solo 3,4), scope estraneo non
+  vede alcun evento (né via porta né via SQL diretto).
+- Integration `tests/integration/test_api_runs.py` (+4 test):
+  `events_sse_replay_e_terminale` (SSE con delta+completed, sequence
+  crescente monotona da 1), `events_after_cursore_ricomincia_dal_successivo`
+  (cursore query + Last-Event-ID prevale sul query), `cancel_idempotente`
+  (POST idempotente su run terminale), `cancel_su_run_inesistente_e_404`.
+- Integration `tests/integration/test_run_cancel.py` (1 nuovo file con
+  1 test): un `_GatedModel` emette il primo delta e attende; il test
+  chiama `POST /cancel` durante l'attesa, sblocca il modello, e
+  verifica che il run finisca in `cancelled` con evento `cancel_requested`
+  nella coda e terminale `cancelled`.
+
+Esecuzioni (26/09/2026, cluster PostgreSQL 16 + pgvector locale):
+
+- `uv run pytest -q tests/unit tests/contracts`: **339 passed**, 2
+  warning di terze parti.
+- `uv run pytest -q tests/integration` con `NEWRAY_TEST_*_URL`:
+  **79 passed**, 2 warning di terze parti.
+- `uv run ruff check`, `uv run ruff format --check`, `uv run mypy src`
+  (75 file), checker architettura (75 file): tutti verdi.
+- `python scripts/generate_contracts.py`: openapi.json e api.d.ts
+  aggiornati con `RunSnapshotDTO.cancel_requested_at`, `POST /cancel`
+  e `GET /events`.
+
+Restano fuori dalla slice backend, per una slice frontend dedicata:
+migrazione del composer chat (`web/src/features/chat`) dalla vecchia
+route inline `POST /conversations/{id}/run` (SSE preview) alla nuova
+`POST /conversations/{id}/runs` + `GET /runs/{id}/events` con reducer
+puro nel client, gestione di reconnect via `Last-Event-ID`, snapshot
+coerente al cursore, pulsante Stop mappato su `POST /runs/{id}/cancel`
+con richiesta visibile fino all'esito autorevole. La route inline
+rimane deprecata e funzionante per la compatibilità transitoria.
 
 ### P-07 — Gateway e ciclo tool sullo stesso Gemma
 

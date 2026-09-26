@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from newray.modules.runs import (
+    CancelRequested,
     ClaimedRun,
     DurableRun,
     LeaseLost,
@@ -33,6 +34,8 @@ class _Row:
     lease_until: datetime | None = None
     fence: int = 0
     state: RunState = RunState.QUEUED
+    cancel_requested: bool = False
+    deltas: list[str] = field(default_factory=list)
 
 
 class FakeStore:
@@ -102,7 +105,7 @@ class FakeStore:
             row.lease_until = lease_until
             return True
 
-    def save_partial(self, run_id, worker_id, fence, partial_text, now):
+    def save_partial(self, run_id, worker_id, fence, partial_text, delta_text, now):
         with self._lock:
             row = self._rows.get(run_id)
             if row is None:
@@ -110,7 +113,28 @@ class FakeStore:
             if row.state != RunState.RUNNING or row.lease_owner != worker_id or row.fence != fence:
                 return False
             row.run = _replace_partial(row.run, partial_text)
+            row.deltas.append(delta_text)
             return True
+
+    def is_cancel_requested(self, worker_id, run_id, fence):
+        with self._lock:
+            row = self._rows.get(run_id)
+            if row is None:
+                return False
+            if row.state != RunState.RUNNING or row.lease_owner != worker_id or row.fence != fence:
+                return False
+            return row.cancel_requested
+
+    def request_cancel(self, scope, run_id, now):  # pragma: no cover - test-only
+        with self._lock:
+            row = self._rows.get(run_id)
+            if row is None:
+                return None
+            row.cancel_requested = True
+            return self._project(row)
+
+    def list_events_after(self, scope, run_id, after_sequence, limit):  # pragma: no cover
+        return []
 
     def finalize(
         self,
@@ -163,6 +187,7 @@ class FakeStore:
             lease_owner=row.lease_owner,
             lease_until=row.lease_until,
             fence=row.fence,
+            cancel_requested_at=base.cancel_requested_at,
             created_at=base.created_at,
             updated_at=base.updated_at,
         )
@@ -186,6 +211,7 @@ def _replace_partial(run: DurableRun, partial: str) -> DurableRun:
         lease_owner=run.lease_owner,
         lease_until=run.lease_until,
         fence=run.fence,
+        cancel_requested_at=run.cancel_requested_at,
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
@@ -216,6 +242,7 @@ def _replace_terminal(
         lease_owner=None,
         lease_until=None,
         fence=run.fence,
+        cancel_requested_at=run.cancel_requested_at,
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
@@ -251,6 +278,7 @@ def _make_run() -> DurableRun:
         lease_owner=None,
         lease_until=None,
         fence=0,
+        cancel_requested_at=None,
         created_at=now,
         updated_at=now,
     )
@@ -264,8 +292,10 @@ class RecordingExecutor:
 
     async def execute(self, run, checkpoint):
         self.saw_run = run
+        accumulated = ""
         for chunk in self.partials:
-            await checkpoint.save(chunk)
+            accumulated += chunk
+            await checkpoint.save(chunk, accumulated)
         return self.outcome
 
 
@@ -359,7 +389,7 @@ def test_checkpoint_leaselost_interrompe_executor() -> None:
             # bump fence prima del save → checkpoint deve fallire
             store.force_bump_fence(run_.id)
             try:
-                await checkpoint.save("parziale")
+                await checkpoint.save("parziale", "parziale")
             except LeaseLost as exc:
                 lease_lost_seen.append(exc)
                 raise
@@ -389,6 +419,34 @@ def test_executor_error_produce_stato_failed() -> None:
     assert row.state == RunState.FAILED
     assert row.run.finish_reason is not None
     assert row.run.finish_reason.startswith("executor_error:")
+
+
+def test_cancel_richiesto_produce_finalize_cancelled() -> None:
+    """Il flag ``cancel_requested`` è rilevato al prossimo checkpoint."""
+
+    store = FakeStore()
+    run = _make_run()
+    store.seed_queued(run)
+
+    class CancellableExecutor:
+        async def execute(self, run_, checkpoint: PartialCheckpoint):
+            await checkpoint.save("uno ", "uno ")
+            # Simula la cancel richiesta dopo il primo delta.
+            store._rows[run_.id].cancel_requested = True
+            # Il prossimo checkpoint deve sollevare CancelRequested.
+            try:
+                await checkpoint.save("due", "uno due")
+            except CancelRequested:
+                raise
+            return RunOutcome(RunState.COMPLETED, "stop", "irraggiungibile")  # pragma: no cover
+
+    worker = Worker(store, CancellableExecutor(), _FixedClock(datetime.now(UTC)))
+    asyncio.run(worker.poll_once())
+    row = store.snapshot(run.id)
+    assert row.state == RunState.CANCELLED
+    assert row.run.finish_reason == "cancelled"
+    # Il partial persistito prima della cancel è preservato.
+    assert row.run.partial_text == "uno due"
 
 
 def test_costruttore_rifiuta_heartbeat_maggiore_lease() -> None:
