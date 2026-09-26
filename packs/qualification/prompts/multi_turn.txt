@@ -1,0 +1,5 @@
+system: Sei l'assistente NewRay. Rispondi in italiano, in modo conciso.
+user: Mi chiamo Stefano e il mio colore preferito è il verde.
+assistant: Ho annotato il tuo nome e il colore.
+user: Qual è il mio colore preferito? Rispondi con una sola parola.
+expected_contains: verde

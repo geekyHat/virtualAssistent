@@ -28,8 +28,17 @@ from newray.modules.models.qualification import (
     QualificationStore,
     qualified_capabilities_for,
 )
+from newray.modules.models.qualification_campaign import (
+    CampaignConfig,
+    CampaignResult,
+    ProbeOutcome,
+    RuntimeProbe,
+    run_campaign,
+)
 
 __all__ = [
+    "CampaignConfig",
+    "CampaignResult",
     "ChatMessage",
     "ChatModel",
     "ChatRequest",
@@ -44,11 +53,14 @@ __all__ = [
     "ModelInfo",
     "ModelReadiness",
     "ModelStatus",
+    "ProbeOutcome",
     "QualificationRecord",
     "QualificationStore",
     "ReadinessState",
+    "RuntimeProbe",
     "RUNTIME_OLLAMA",
     "StreamEvent",
     "discover_hardware",
     "qualified_capabilities_for",
+    "run_campaign",
 ]

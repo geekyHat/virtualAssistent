@@ -1,0 +1,17 @@
+{
+  "type": "function",
+  "function": {
+    "name": "knowledge_search",
+    "description": "Cerca passaggi nei documenti interni autorizzati dell'utente.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Testo da cercare nei documenti."
+        }
+      },
+      "required": ["query"]
+    }
+  }
+}

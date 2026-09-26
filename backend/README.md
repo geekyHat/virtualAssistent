@@ -126,6 +126,36 @@ origine singola bastano per lo sviluppo loopback. Bind, porta, cookie
 Secure, `NEWRAY_DATA_DIR` (da A-07) e `NEWRAY_OLLAMA_BASE_URL` (da B-03)
 sono validati dai settings.
 
+## Qualifica del pilot (P-19)
+
+Il candidato pilot va **qualificato** su ciascun host: la campagna scrive
+un rapporto JSON atomico con `run_id` fresco (mai riusa uno precedente
+come successo) e, su successo completo, un `QualificationRecord`
+persistente ancorato a digest + runtime + hardware. Al primo mismatch
+(nuovo digest, GPU diversa, cambio runtime) la qualifica decade e le
+`qualified_capabilities` del readiness tornano vuote.
+
+Esecuzione (dal repo root, richiede Ollama in loopback e il modello del
+catalogo importato):
+
+```sh
+backend/.venv/bin/python scripts/qualify_pilot.py \
+    --output runtime/qualification-report.json
+```
+
+- Report: `runtime/qualification-report.json` (scrittura atomica ad ogni
+  fase; interruzione lascia `attempt_completed_at=None`, mai `passed=true`).
+- Record: `~/.local/share/newray/qualifications/<model>.json`
+  (schema_version 1). Revoca esplicita: `store.invalidate(model_name)`
+  o cancellazione del file.
+- Corpus e soglie: `packs/qualification/` (entrano nel `corpus_hash` /
+  `config_hash`). Modificarne uno cambia l'hash e richiede una nuova
+  campagna.
+
+Il default è ristretto al **solo candidato pilot** del catalogo; usare
+`--model <id>` per qualificare un altro record con decisione operativa
+esplicita.
+
 ## Stack bloccato (A-01, 16 settembre 2026)
 
 `pyproject.toml` + `uv.lock` (45 pacchetti, CPython 3.12.12).

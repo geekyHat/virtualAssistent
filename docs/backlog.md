@@ -958,8 +958,8 @@ rimane deprecata e funzionante per la compatibilità transitoria.
 
 ### P-19 — Strumenti di qualifica con rapporti affidabili
 
-- **Stato / priorità:** In corso (backend/infra completati 26/09/2026,
-  refactor script live richiede GPU) / P1, anticipare a fase 0.
+- **Stato / priorità:** Completato (26/09/2026, prove live P-20) / P1,
+  anticipato a fase 0.
 - **Proprietario:** scripts/qualifica, models; test tooling.
 - **Dipendenze:** P-01.
 - **Contratto e risultato:** report JSON progressivo/atomico per esecuzione
@@ -1072,18 +1072,88 @@ format --check`, `uv run mypy src` (80 file), checker architettura
 `python scripts/generate_contracts.py`: openapi.json e api.d.ts non
 cambiano (il campo nuovo non appare nelle route pubbliche esistenti).
 
-Restano fuori dalla slice, come slice separata di P-19:
-- Refactor di `scripts/qualify_local_models.py` per usare
-  `QualificationReportWriter` (run_id, fasi, hash, atomicità del
-  rapporto) e `FileQualificationStore` (registrazione del
-  `QualificationRecord` solo se **tutte** le sonde obbligatorie sono
-  passate).
-- Corpus di qualifica congelato in `packs/qualification/` con hash
-  pinnato; test con fault injection per fase su un mock runtime.
-- Documentazione operativa in `backend/README.md` per l'esecuzione
-  della campagna e la revoca esplicita (`invalidate`).
-- Prove live P-20 restano fuori scope: la qualifica live richiede GPU
-  reale e sarà condotta con questo tooling.
+**Slice di chiusura P-19 (26/09/2026) — campagna orchestrata, fault
+injection e corpus congelato.** Il tooling P-19 è ora completo e
+testato offline; la prova live su Gemma+GPU AMD rientra in P-20.
+
+- **`newray.modules.models.qualification_campaign.run_campaign`:**
+  orchestrazione asincrona pura. `RuntimeProbe` (Protocol) espone
+  `discover/warmup/load/probes/unload`. `ProbeOutcome` con
+  `status ∈ {passed, failed, skipped}` + `problems`, e valori speciali
+  `digest`/`declared_capabilities` per `discover` e
+  `qualified_capabilities` per `probes`. La campagna esegue le fasi in
+  ordine, marca `skipped` le successive se una fallisce, e chiude
+  **sempre** con `unload` per rilasciare le risorse. Le eccezioni
+  `Exception` sono catturate e tradotte in `failed`; le eccezioni
+  `BaseException` (KeyboardInterrupt, SystemExit, CancelledError)
+  propagano prima di `unload` e lasciano il rapporto con
+  `attempt_completed_at=None` (interruzione preservata, non trasformata
+  in successo).
+- **Registrazione del record:** `QualificationRecord` viene scritto
+  **solo** se tutte le fasi sono `passed` **e** il probe ha dichiarato
+  `qualified_capabilities` non vuote. Un rapporto `passed=True` senza
+  capacità dimostrate non genera record. `declared_capabilities`
+  vengono conservate in `record.extra`. `created_at` del record
+  coincide con `attempt_started_at` del rapporto, per riproducibilità.
+  Un fallimento in una campagna successiva **non** invalida un record
+  precedente: la revoca è responsabilità esplicita (`store.invalidate`).
+- **CLI `scripts/qualify_pilot.py`:** wrapper sottile su
+  `run_campaign`. Costruisce `OllamaRuntimeProbe` riusando le funzioni
+  di sonda già esistenti in `scripts/qualify_local_models.py`
+  (`probe_stream_basic`, `probe_system_instruction`,
+  `probe_multi_turn`, `probe_truncation`, `probe_cancellation`,
+  `probe_tool_call`). Il probe determina `qualified_capabilities`
+  in modo osservazionale: `chat` se tutte le chat probes passano,
+  `tools` se `probe_tool_call` passa. Il default è ristretto al solo
+  candidato pilot (`catalog.default_model`); `--model` è override
+  esplicito. `_build_config` calcola `code_hash` sui sorgenti di
+  qualifica (script + moduli campaign/qualification/report),
+  `config_hash` su catalogo + `thresholds.toml` + modello + runtime,
+  `corpus_hash` sul contenuto di `packs/qualification/`. Registra il
+  record in `<data_dir>/qualifications/<model>.json` (default
+  `~/.local/share/newray/qualifications`).
+- **Corpus congelato in `packs/qualification/`:** `README.md`,
+  `LICENSE` (materiale sintetico interno, nessun documento privato),
+  `prompts/` (stream_basic, system_prefix, multi_turn, truncation) e
+  `tools/knowledge_search.json`; `thresholds.toml` (schema_version 1)
+  fissa min_deltas, budget_tokens del troncamento, delta di
+  cancellazione, VRAM margin. Modificare un file cambia
+  `corpus_hash`/`config_hash` e richiede una nuova campagna.
+- **README backend:** sezione dedicata al comando di qualifica, ai
+  path del rapporto e del record, alla revoca esplicita, alla
+  restrizione al candidato pilot.
+
+Prove aggiunte:
+
+- Unit `tests/unit/test_qualification_campaign.py` (15 test): success
+  scrive record + exit 0; **fault injection parametrico** su ognuna
+  delle 4 fasi obbligatorie (discovery/warmup/load/probe) → JSON valido
+  con phase failed, successive `skipped`, `unload` sempre eseguito,
+  exit 1, nessun record scritto; eccezione grezza dal probe catturata
+  come `failed` (RuntimeError nel driver); probe passa ma senza
+  capacità qualificate → no record; `hardware=None` → no record;
+  campagna da **CWD diversa** con path assoluto funziona (test cambia
+  `os.chdir` e verifica scrittura corretta); interruzione
+  (`KeyboardInterrupt`) propaga, lascia `attempt_completed_at=None`,
+  fase raggiunta `passed`, nessun record; probe che ritorna un valore
+  non-`ProbeOutcome` diventa `failed`; `record.extra` conserva
+  `declared_capabilities` con roundtrip su store; `created_at` del
+  record ancorato a `attempt_started_at`; fallimento in una campagna
+  successiva **non** invalida un record precedente.
+
+Esecuzioni (26/09/2026): `uv run pytest -q tests/unit tests/contracts`:
+**377 passed**, 2 warning di terze parti. `uv run pytest -q
+tests/integration`: **79 passed**. `uv run ruff check`,
+`uv run ruff format --check`, `uv run mypy src` (81 file), checker
+architettura (81 file): tutti verdi. CLI `qualify_pilot.py --help`
+carica senza errori sotto `uv run python`.
+
+**Fuori scope, per P-20 (qualifica live):** eseguire
+`scripts/qualify_pilot.py` sulla workstation AMD dell'utente
+(container cloud senza GPU non può), verificare i valori misurati
+(latenza al primo delta, throughput, done_reason del troncamento),
+ispezionare il record persistito, provare la revoca esplicita del
+record e la sua rigenerazione al cambio digest.
 
 ### P-20 — Qualifica live e accettazione del pilot
 

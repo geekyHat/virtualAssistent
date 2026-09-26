@@ -141,9 +141,7 @@ def build_app() -> FastAPI:
             raw_catalog = build_model_catalog(ollama_client)
             qualification_store = build_qualification_store(settings)
             hardware = discover_hardware()
-            catalog = wrap_catalog_with_qualification(
-                raw_catalog, qualification_store, hardware
-            )
+            catalog = wrap_catalog_with_qualification(raw_catalog, qualification_store, hardware)
             app.state.profile_service = build_profile_service(engine, settings, catalog)
             chat_model = build_chat_model(ollama_client, settings)
             inline_run_service = InlineRunService(

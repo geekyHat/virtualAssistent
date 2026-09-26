@@ -1,0 +1,4 @@
+system: Sei l'assistente NewRay. Rispondi in italiano, in modo conciso.
+user: Elenca i numeri da 1 a 300 separati da virgola, senza commenti.
+budget_tokens: 24
+expected_finish_reason: length

@@ -1,0 +1,31 @@
+# Soglie fisse della campagna di qualifica (P-19).
+# Cambiare un valore rende obsoleta la qualifica precedente per contratto:
+# il file entra nel `config_hash` del rapporto.
+
+schema_version = 1
+
+[stream_basic]
+# Minimo delta necessario per considerare lo stream "incrementale".
+min_deltas = 2
+# Nessuna latenza di primo delta prescritta a monte: valutata a occhio
+# nel rapporto (`first_delta_seconds`) e confrontata dall'utente.
+
+[truncation]
+# Budget di token per il caso di test: se il runtime raggiunge il limite,
+# ci aspettiamo `finish_reason == "length"`.
+budget_tokens = 24
+
+[cancellation]
+# Delta oltre i quali il test ferma volontariamente lo stream.
+stop_after_deltas = 5
+
+[tool_call]
+# Deve comparire nel messaggio finale dopo il secondo passaggio.
+final_must_contain = "46"
+
+[global]
+# Margine VRAM oltre la dimensione del modello, in byte: cache KV e overhead
+# non stanno nel peso del file.
+vram_margin_bytes = 3221225472  # 3 GiB
+# Timeout complessivo per una singola chiamata al runtime.
+per_call_timeout_seconds = 600

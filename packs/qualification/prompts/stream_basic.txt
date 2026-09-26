@@ -1,0 +1,1 @@
+Elenca in una riga tre capoluoghi di regione italiani.
