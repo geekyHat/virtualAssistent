@@ -663,7 +663,9 @@ rimane deprecata e funzionante per la compatibilità transitoria.
 
 ### P-07 — Gateway e ciclo tool sullo stesso Gemma
 
-- **Stato / priorità:** Da fare / P0.
+- **Stato / priorità:** In corso (26/09/2026 — fondazione registry +
+  primo tool completate; loop executor, outbox invocazioni e approval
+  flow rimangono) / P0.
 - **Proprietario:** tools/gateway, access; porte runs/models.
 - **Dipendenze:** P-05.
 - **Contratto e risultato:** tool call/result strutturati, schema validato,
@@ -684,6 +686,82 @@ rimane deprecata e funzionante per la compatibilità transitoria.
   Gemma in P-20, non dedotto dal fake.
 - **Limiti / recupero:** nessuna shell generica, nessun MCP server arbitrario
   installato. I futuri adapter si aggiungono a questa autorità, non la bypassano.
+
+**Slice fondazione P-07 (26/09/2026) — dominio tool + registry + primo
+tool concreto.** Costruisce le porte del gateway; l'integrazione nel
+loop dell'executor, la outbox `tool_invocations` e il flusso approval
+restano come slice successive.
+
+- **`newray.modules.tools` (nuovo modulo):**
+  - Dominio (`domain.py`): `ToolCall` (call_id, tool_name, arguments
+    JSON-frozen), `ToolResult` (call_id, tool_name, state terminale,
+    payload frozen, problems), `ToolInvocationState` con gli stati del
+    ticket (`prepared`, `awaiting_approval`, `executing`, `succeeded`,
+    `failed`, `outcome_unknown`), `TERMINAL_INVOCATION_STATES`.
+    `ToolCall.arguments` e `ToolResult.payload` sono deep-frozen su
+    tipi JSON-serializzabili: oggetti Python arbitrari sono
+    respinti con `ValueError` — un client non può iniettare puntatori
+    a oggetti come argomento.
+  - Registry (`registry.py`): `ToolSchema` (sottoinsieme JSON Schema
+    stringente — `additional_properties=false`, tipi
+    string/integer/number/boolean, `enum` opzionale), `ToolDescriptor`
+    (name, description, schema, `requires_approval`), `Tool` protocol,
+    `ToolRegistry` con allowlist immutabile: `get`/`validate_call`
+    sollevano `ToolUnknownError` per nomi fuori allowlist e
+    `ToolSchemaError` per argomenti mal formati. Il registry è
+    iniettato dal bootstrap; **nessuna** installazione a runtime da
+    testo, prompt o annotazioni MCP.
+- **Primo tool `run_status`** (`adapters/run_status.py`): legge lo
+  snapshot autorevole di un run dello scope del principal. Nessun
+  effetto esterno. `run_id` argomento come stringa UUID; validazione
+  fallita → `failed` con motivo (non exception). `NotFound` (scope
+  estraneo o id inesistente) → `failed` con messaggio **uniforme**
+  ("run non trovato nello scope corrente"): il tool non rivela la
+  differenza fra "non esiste" e "esiste ma di un altro utente".
+
+Prove aggiunte:
+
+- `tests/unit/test_tools_registry.py` (14 test): schema rifiuta
+  argomenti non dichiarati, richiesti mancanti, tipi errati (incluso
+  bool non-int); enum rispettato; registry rifiuta tool ignoto
+  (`ToolUnknownError`); `validate_call` verifica schema; descriptors
+  espone la sola allowlist; `ToolCall` congela argomenti (mutazione
+  in-place solleva `TypeError`) e rifiuta valori non
+  JSON-serializzabili; `run_status` ritorna snapshot scoped;
+  argomento non-UUID → failed non exception; run fuori scope → failed
+  con messaggio uniforme; `ToolResult(succeeded)` con problems
+  rifiutato; `ToolResult` con stato non terminale rifiutato.
+
+Esecuzioni (26/09/2026): `uv run pytest -q tests/unit tests/contracts`:
+**391 passed**, 2 warning di terze parti; ruff/format/mypy/architettura
+(87 file): tutti verdi.
+
+Restano fuori dalla slice, come slice successive di P-07 (ognuna un
+push separato):
+
+1. **Estensione `ChatRequest` + adapter Ollama:** accettare
+   `tools: tuple[ToolDescriptor, ...]` (dizionario JSON verso Ollama)
+   e ricevere `tool_calls` come nuovo tipo `StreamEvent`. Contract
+   test su NDJSON con `tool_calls`.
+2. **Migrazione `tool_invocations`** (outbox scoped/RLS): id,
+   run_id FK, call_id UNIQUE per run, tool_name, state, payload,
+   problems, created_at/updated_at. Ricevute idempotenti per invocation.
+3. **Integrazione nel `ChatModelRunExecutor`:** loop
+   `stream → tool_calls → registry.validate_call →
+   principal→tool.execute → append role="tool" → re-stream`.
+   Limiti: numero tool_calls per run, output totale, deadline
+   complessiva. Interruzione su `CancelRequested` e su
+   `LeaseLost` come già succede oggi.
+4. **Eventi durevoli `tool_call`/`tool_result`** nella outbox
+   `run_events` (allargare `event_type` check enum in una migration
+   dedicata).
+5. **Approval flow:** stato `AWAITING_APPROVAL` sul run, tabella
+   `tool_approvals` con payload/scadenza, `POST /runs/{id}/approvals`
+   idempotente e consumato atomicamente al momento dell'esecuzione.
+   Interruzione su revoca dell'approvazione.
+6. **Adversarial (P-17) sui tool:** verificare che nessun tool
+   consumi path/URL dagli argomenti come identità, che schema alterato
+   sia rifiutato, che tool sconosciuto non venga eseguito.
 
 ### P-08 — Allegati e archivio file con confine di sicurezza reale
 
