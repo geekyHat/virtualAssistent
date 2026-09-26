@@ -418,6 +418,47 @@ ruff e mypy verdi. Il cluster PostgreSQL temporaneo usato per queste prove
 checkpoint del parziale, endpoint/snapshot pubblico, restart e prove di
 contenzione GPU prima della chiusura P-05.
 
+**Seconda slice interna P-05 (26/09/2026) — worker con claim atomico e
+fencing.** La migrazione `0010_run_worker_access` aggiunge una seconda
+policy RLS `runs_worker_access` sulla tabella `runs`, attivata solo quando
+il chiamante ha impostato `app.worker_id`; la policy `runs_isolation` per
+principal utente resta invariata. `PostgresRunStore` guadagna quattro
+metodi sotto quella policy: `claim` fa `UPDATE ... WHERE id = (SELECT ...
+FOR UPDATE SKIP LOCKED LIMIT 1)` selezionando run in stato `queued` o
+`running` con lease scaduto, bumpa `fence` di uno e imposta
+`lease_owner`/`lease_until` in una sola transazione; `renew_lease`,
+`save_partial` e `finalize` accettano solo se `lease_owner`+`fence`+
+`state='running'` combaciano ancora, altrimenti ritornano `False` senza
+scritture. `worker.py` introduce `RunExecutor` (protocollo senza
+implementazione reale in questa slice), `PartialCheckpoint`, `RunOutcome`,
+`LeaseLost` e la classe `Worker` con `poll_once()`/`run_forever()`,
+heartbeat asincrono e wrapper del checkpoint che solleva `LeaseLost` quando
+il save fallisce; nessuna transazione DB resta aperta durante l'attesa
+dell'executor. La slice resta **interna**: nessun endpoint pubblico,
+nessun binding all'inference reale (Ollama entra nelle slice successive
+di P-05/P-07) e nessuna wiring nel bootstrap. Prove:
+`backend/tests/unit/test_worker_loop.py` (6 test — coda vuota, finalize
+sotto fence, fence bumpato durante execute, `LeaseLost` dal checkpoint,
+executor exception → `FAILED`, invariante costruttore heartbeat<lease);
+`backend/tests/integration/test_run_worker.py` (4 test PostgreSQL reali
+— due worker concorrenti con un solo vincitore, riclaim su lease scaduto
+con vecchio worker che non finalizza né rinnova né checkpoint, `renew_lease`
+sotto fence valido, e RLS: scope estraneo senza `app.worker_id` non vede
+né aggiorna i run di un altro utente). Esecuzioni:
+`uv run pytest -q tests/unit tests/contracts` da `backend/`: **324 passed**,
+2 warning di terze parti; `uv run pytest -q tests/integration --tb=short`
+con `NEWRAY_TEST_*_URL` verso cluster PostgreSQL 16 + pgvector locale:
+**70 passed**, 2 warning di terze parti. `uv run ruff check`, `uv run ruff
+format --check`, `uv run mypy src` (71 file), checker architettura
+(71 file, kernel pulito, nessun ciclo di import): tutti verdi. Il cluster
+PostgreSQL temporaneo usato per queste prove è locale al container di
+sviluppo e non contiene dati di produzione. Restano da fare per chiudere
+P-05: implementazione `RunExecutor` reale su binding Gemma con budget di
+tempo/token/turni, endpoint pubblico `POST /conversations/{id}/runs` e
+snapshot, wiring nel bootstrap (launcher del worker con ownership/readiness
+esplicite), restart cross-process, un'inference generativa attiva per
+risorsa e prove di contenzione GPU.
+
 ### P-06 — Eventi durevoli, stop e migrazione della chat browser
 
 - **Stato / priorità:** Da fare / P0.

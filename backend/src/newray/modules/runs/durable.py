@@ -70,6 +70,21 @@ def thaw_json(value: object) -> object:
     return value
 
 
+@dataclass(frozen=True, slots=True)
+class ClaimedRun:
+    """Run acquisito da un worker: identifica lease e fence attivi.
+
+    ``fence`` è il valore osservato dopo l'incremento del claim; il worker
+    deve rifiutare ogni scrittura successiva se il valore in DB è diverso
+    (lease scaduto e riassegnato).
+    """
+
+    run: DurableRun
+    worker_id: uuid.UUID
+    lease_until: datetime
+    fence: int
+
+
 class RunStore(Protocol):
     def enqueue(self, run: DurableRun) -> DurableRun:
         """Atomicità della ricevuta scoped; payload diverso = Conflict."""
@@ -80,3 +95,63 @@ class RunStore(Protocol):
     def find_by_key(
         self, scope: Scope, conversation_id: uuid.UUID, idempotency_key: str
     ) -> DurableRun | None: ...
+
+    def claim(
+        self,
+        worker_id: uuid.UUID,
+        lease_duration_seconds: int,
+        now: datetime,
+    ) -> ClaimedRun | None:
+        """Acquisisce atomicamente un run pronto (queued o lease scaduto).
+
+        Bumpa ``fence`` e imposta lease/lease_until per identificare la
+        generazione corrente. Nessuna altra transazione può finalizzare un
+        run con fence obsoleto.
+        """
+        ...
+
+    def renew_lease(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        lease_until: datetime,
+        now: datetime,
+    ) -> bool:
+        """Prolunga il lease se il worker detiene ancora la generazione.
+
+        Ritorna ``False`` se un altro claim ha bumpato ``fence``: il worker
+        deve interrompere l'esecuzione e non finalizzare.
+        """
+        ...
+
+    def save_partial(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        partial_text: str,
+        now: datetime,
+    ) -> bool:
+        """Checkpoint incrementale del testo parziale (solo lease vivo)."""
+        ...
+
+    def finalize(
+        self,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        state: RunState,
+        finish_reason: str | None,
+        partial_text: str,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        eval_duration_ns: int | None,
+        now: datetime,
+    ) -> bool:
+        """Chiude il run in stato terminale se il lease è ancora valido.
+
+        Ritorna ``False`` su fence obsoleto o lease già liberato; il worker
+        non deve trattare quel caso come successo (§P-05).
+        """
+        ...
