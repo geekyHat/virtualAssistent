@@ -23,7 +23,7 @@ from newray.interfaces.http.routes.profiles import build_router as build_profile
 from newray.interfaces.http.routes.runs import build_router as build_runs_router
 from newray.modules.conversations import ConversationService
 from newray.modules.identity import IdentityService
-from newray.modules.models import ChatModel
+from newray.modules.models import ChatModel, discover_hardware
 from newray.modules.profiles import ProfileService
 from newray.modules.runs import (
     DurableRunService,
@@ -41,8 +41,10 @@ from .wiring import (
     build_model_catalog,
     build_ollama_client,
     build_profile_service,
+    build_qualification_store,
     build_run_event_reader,
     build_run_launcher,
+    wrap_catalog_with_qualification,
 )
 
 
@@ -136,7 +138,12 @@ def build_app() -> FastAPI:
                 resources.push_async_callback(ollama_client.aclose)
             app.state.identity_service = build_identity_service(engine)
             app.state.conversation_service = build_conversation_service(engine)
-            catalog = build_model_catalog(ollama_client)
+            raw_catalog = build_model_catalog(ollama_client)
+            qualification_store = build_qualification_store(settings)
+            hardware = discover_hardware()
+            catalog = wrap_catalog_with_qualification(
+                raw_catalog, qualification_store, hardware
+            )
             app.state.profile_service = build_profile_service(engine, settings, catalog)
             chat_model = build_chat_model(ollama_client, settings)
             inline_run_service = InlineRunService(

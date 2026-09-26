@@ -20,7 +20,14 @@ from newray.modules.models.domain import (
     ReadinessState,
     StreamEvent,
 )
+from newray.modules.models.hardware import discover_hardware
 from newray.modules.models.ports import ChatModel, ModelCatalog
+from newray.modules.models.qualification import (
+    HardwareFingerprint,
+    QualificationRecord,
+    QualificationStore,
+    qualified_capabilities_for,
+)
 
 __all__ = [
     "ChatMessage",
@@ -30,13 +37,18 @@ __all__ = [
     "Completion",
     "ContentDelta",
     "DEFAULT_MODEL_NAME",
+    "HardwareFingerprint",
     "MAX_CHAT_MESSAGE_LENGTH",
     "MAX_MODEL_NAME_LENGTH",
     "ModelCatalog",
     "ModelInfo",
     "ModelReadiness",
     "ModelStatus",
+    "QualificationRecord",
+    "QualificationStore",
     "ReadinessState",
     "RUNTIME_OLLAMA",
     "StreamEvent",
+    "discover_hardware",
+    "qualified_capabilities_for",
 ]

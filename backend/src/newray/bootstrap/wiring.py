@@ -17,9 +17,11 @@ from newray.modules.identity.adapters.postgres import (
     PostgresSessionStore,
     PostgresUserRepository,
 )
-from newray.modules.models import ChatModel, ModelCatalog
+from newray.modules.models import ChatModel, HardwareFingerprint, ModelCatalog
 from newray.modules.models.adapters.empty import EmptyModelCatalog, UnavailableChatModel
 from newray.modules.models.adapters.ollama import OllamaChatModel, OllamaModelCatalog
+from newray.modules.models.adapters.qualification_file import FileQualificationStore
+from newray.modules.models.adapters.qualified_catalog import QualifiedModelCatalog
 from newray.modules.profiles import ProfileService
 from newray.modules.profiles.adapters.postgres import (
     PostgresModelBindingStore,
@@ -88,6 +90,31 @@ def build_model_catalog(client: HttpClient | None) -> ModelCatalog:
     if client is None:
         return EmptyModelCatalog()
     return OllamaModelCatalog(client)
+
+
+def build_qualification_store(settings: Settings) -> FileQualificationStore:
+    """Store file-based della qualifica (P-19).
+
+    Ogni host ha la sua qualifica in ``settings.data_dir / "qualifications"``:
+    nessun scope (§9.1) — la qualifica è uno stato del runtime, non un dato
+    privato dell'utente.
+    """
+    return FileQualificationStore(settings.data_dir / "qualifications")
+
+
+def wrap_catalog_with_qualification(
+    base: ModelCatalog,
+    store: FileQualificationStore,
+    hardware: HardwareFingerprint | None,
+    runtime: str = "ollama",
+) -> ModelCatalog:
+    """Aggiunge le capacità qualificate al ``readiness``/``list_models`` (P-19).
+
+    Il wrapper non concede ``QUALIFIED``: si limita a mostrare le capacità
+    dimostrate dalla campagna per digest/runtime/hardware correnti. Su
+    mismatch le capacità dichiarate restano ma quelle qualificate sono ``()``.
+    """
+    return QualifiedModelCatalog(base, store, hardware, runtime)
 
 
 def build_profile_service(

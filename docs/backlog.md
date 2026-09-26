@@ -958,7 +958,8 @@ rimane deprecata e funzionante per la compatibilità transitoria.
 
 ### P-19 — Strumenti di qualifica con rapporti affidabili
 
-- **Stato / priorità:** Da fare / P1, anticipare a fase 0.
+- **Stato / priorità:** In corso (backend/infra completati 26/09/2026,
+  refactor script live richiede GPU) / P1, anticipare a fase 0.
 - **Proprietario:** scripts/qualifica, models; test tooling.
 - **Dipendenze:** P-01.
 - **Contratto e risultato:** report JSON progressivo/atomico per esecuzione
@@ -983,6 +984,106 @@ rimane deprecata e funzionante per la compatibilità transitoria.
   Contract/fake per mismatch e revoca della qualifica; UI completa in P-04.
 - **Limiti / recupero:** non riqualificare i quattro modelli storici. Generare
   un report non equivale a passarlo; nessuna installazione/download automatici.
+
+**Slice backend/infra P-19 (26/09/2026, anticipata a fase 0).** Ha
+consegnato l'infrastruttura di qualifica offline, riproducibile e
+testata senza GPU. Il refactor dello script live (`scripts/qualify_local_models.py`)
+per usare la nuova infrastruttura richiede un ambiente con Ollama+Gemma
+funzionante e resta come slice successiva.
+
+- **`newray.modules.models.qualification`:** dominio della prova
+  persistente. `HardwareFingerprint(gpu_device, gpu_total_bytes, cpu_arch)`
+  identifica **il device fisico**, non "una GPU generica". `QualificationRecord`
+  contiene `model_name, digest, runtime, hardware, qualified_capabilities,
+  report_run_id, code_hash, config_hash, corpus_hash, created_at, extra`.
+  Metodo `applies_to(digest, runtime, hardware)` che decade appena una
+  delle tre coordinate cambia. Funzione `qualified_capabilities_for(store,
+  ...)` ritorna `()` su mismatch: non concede mai capacità.
+- **`FileQualificationStore`:** persistenza JSON per host in
+  `<data_dir>/qualifications/<model_name>.json`, `schema_version: 1`,
+  scrittura atomica (tempfile + `os.replace`), lettura che rifiuta file
+  corrotti (`ValueError` esplicito, mai successo silenzioso). Nome del
+  modello vincolato da regex safe (nessun path traversal). Rifiuta
+  `base_dir` relativa. Lo store è per host (§9.1: la qualifica è stato
+  del runtime, non dato privato), quindi nessuno scope, nessuna RLS.
+- **`QualificationReportWriter` + funzioni hash (`qualification_report.py`):**
+  rapporto progressivo con `run_id` UUID fresco a ogni tentativo,
+  fasi fisse (`discovery → warmup → load → probe → unload`), stati
+  `pending/running/passed/failed/skipped`, `attempt_started_at` distinto
+  da `attempt_completed_at`. `passed` è `True` **solo** se tutte le fasi
+  sono `passed` **e** `attempt_completed_at` è valorizzato — un rapporto
+  interrotto resta `passed=False` per sempre. `start_report` sovrascrive
+  il file precedente con `run_id` nuovo: nessuna ereditarietà di
+  successo. Scrittura atomica dopo ogni `finish_phase`. Context
+  manager `writer.phase(name)` marca `running` all'entrata e
+  `failed`+problem su eccezione (rilanciata al chiamante). Hash
+  funzioni: `compute_code_hash(paths)` include path oltre al contenuto,
+  `compute_config_hash(dict)` con `sort_keys=True`, `compute_corpus_hash(dir)`
+  ordinato per path relativo (`None` → sentinella `"no-corpus"`).
+- **`ModelReadiness.qualified_capabilities`:** nuovo campo, distinto da
+  `declared_capabilities` (dichiarato dal runtime `/api/show`). Default
+  `()`: nessun consumatore esistente cambia comportamento finché una
+  campagna non registra un record.
+- **`QualifiedModelCatalog`:** wrapper che avvolge un `ModelCatalog`
+  runtime e uno `QualificationStore` con un `HardwareFingerprint`
+  corrente. In `readiness()` valorizza `qualified_capabilities` solo se
+  digest+runtime+hardware combaciano con un record noto; **non promuove
+  lo status a `QUALIFIED`**. In `list_models()` sostituisce le
+  capacità con quelle qualificate quando disponibili, lasciando le
+  dichiarate come fallback. Su hardware `None` è pass-through.
+- **`newray.modules.models.hardware.discover_hardware`:** legge
+  `/sys/class/drm/card*/device/mem_info_vram_total` per l'identificativo
+  del device (`cardN` stabile), aggiunge `platform.machine()` per l'arch
+  CPU. Nessuna rete, nessuna sonda vendor. Ambiente senza GPU visibile
+  → fingerprint con `gpu_device=None`, che disabilita il wrapper.
+- **Wiring:** `build_qualification_store(settings)` sopra
+  `<data_dir>/qualifications`; `wrap_catalog_with_qualification`
+  compone il wrapper nel `build_app`. Il catalogo pubblico dell'API
+  vede ora le capacità qualificate quando esistono; senza record
+  registrato il comportamento è identico a prima. Nessuna nuova
+  variabile d'ambiente: la qualifica vive sotto la stessa `data_dir`
+  del resto del pilot.
+
+Prove:
+
+- Unit `tests/unit/test_qualification.py` (9 test): `applies_to` su
+  digest/runtime/hardware, roundtrip file store, file corrotto → ValueError,
+  schema_version ignoto → ValueError, invalidate idempotente, rifiuto di
+  `model_name` con path traversal, rifiuto di `base_dir` relativa, file
+  rinominato manualmente rifiutato.
+- Unit `tests/unit/test_qualification_report.py` (10 test):
+  fasi `pending` all'inizio, context manager `running → passed`, context
+  manager con eccezione → `failed` + rilancio, interruzione senza
+  `complete()` lascia `passed=False`, `load_report` di un tentativo
+  passato non è riusabile per nuovo, `start_report` genera `run_id` nuovo
+  e resetta `passed`, nessun file `.tmp` residuo (atomicità), hash
+  deterministici (corpus, config, code), `path` relativa rifiutata,
+  fase con nome ignoto rifiutata.
+- Unit `tests/unit/test_qualified_catalog.py` (4 test): readiness espone
+  qualified_capabilities solo su match digest+hardware+runtime, digest
+  diverso non le espone, list_models sostituisce capacità qualificate
+  senza promuovere status, hardware `None` disabilita il wrapper.
+
+Esecuzioni (26/09/2026): `uv run pytest -q tests/unit tests/contracts`:
+**362 passed**, 2 warning di terze parti. `uv run pytest -q
+tests/integration`: **79 passed**. `uv run ruff check`, `uv run ruff
+format --check`, `uv run mypy src` (80 file), checker architettura
+(80 file, kernel pulito, nessun ciclo): tutti verdi.
+`python scripts/generate_contracts.py`: openapi.json e api.d.ts non
+cambiano (il campo nuovo non appare nelle route pubbliche esistenti).
+
+Restano fuori dalla slice, come slice separata di P-19:
+- Refactor di `scripts/qualify_local_models.py` per usare
+  `QualificationReportWriter` (run_id, fasi, hash, atomicità del
+  rapporto) e `FileQualificationStore` (registrazione del
+  `QualificationRecord` solo se **tutte** le sonde obbligatorie sono
+  passate).
+- Corpus di qualifica congelato in `packs/qualification/` con hash
+  pinnato; test con fault injection per fase su un mock runtime.
+- Documentazione operativa in `backend/README.md` per l'esecuzione
+  della campagna e la revoca esplicita (`invalidate`).
+- Prove live P-20 restano fuori scope: la qualifica live richiede GPU
+  reale e sarà condotta con questo tooling.
 
 ### P-20 — Qualifica live e accettazione del pilot
 

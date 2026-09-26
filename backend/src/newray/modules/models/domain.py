@@ -52,12 +52,25 @@ class ReadinessState(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ModelReadiness:
-    """Solo fatti osservati: /api/show dichiara, non qualifica, capacità."""
+    """Solo fatti osservati: /api/show dichiara, non qualifica, capacità.
+
+    ``declared_capabilities`` viene dal runtime (``/api/show``) e non è una
+    prova operativa: una capacità dichiarata "chat" non implica che il ciclo
+    end-to-end funzioni.
+
+    ``qualified_capabilities`` (P-19) è il sottoinsieme dimostrato dalla
+    campagna di qualifica per **questo digest** sul **runtime e hardware
+    correnti**. Rimane vuoto finché nessuna campagna ha registrato un
+    :class:`QualificationRecord` valido. Se digest/runtime/hardware cambiano
+    rispetto al record, il campo torna vuoto: la qualifica decade e non è
+    riproposta come effettiva finché una nuova campagna non la conferma.
+    """
 
     state: ReadinessState
     model_name: str | None
     digest: str | None = None
     declared_capabilities: tuple[str, ...] = ()
+    qualified_capabilities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
