@@ -903,7 +903,9 @@ rimane deprecata e funzionante per la compatibilità transitoria.
 
 ### P-17 — Verifica avversariale integrata di confini e lifecycle
 
-- **Stato / priorità:** Da fare / P0 prima di dati reali.
+- **Stato / priorità:** In corso (26/09/2026 — copertura sulle superfici
+  attuali; le righe rimandate seguiranno le rispettive slice) / P0 prima
+  di dati reali.
 - **Proprietario:** access/security e owner di ogni superficie dati.
 - **Dipendenze:** P-10, P-16.
 - **Contratto e risultato:** threat model e matrice dei controlli eseguibili,
@@ -923,6 +925,91 @@ rimane deprecata e funzionante per la compatibilità transitoria.
 - **Limiti / recupero:** non sostituisce i test di ciascuna slice né è un
   penetration test universale. La qualifica vale per runtime/configurazione
   identificati; cambi di sandbox/provider richiedono nuove prove.
+
+**Slice P-17 (26/09/2026) — threat model + suite avversariale sulle
+superfici attuali.** Le dipendenze formali (P-10 visione, P-16 skill
+proposte) non sono ancora implementate: il threat model marca queste
+superfici come **rimandate** senza promettere copertura. Le proprietà
+delle superfici già attive (identity, conversations, profiles, runs,
+events, cancel, qualifica, egress) sono state verificate su DB reale
+con ruolo applicativo non owner.
+
+Documentazione:
+
+- `docs/security/README.md`: regole della suite (fixture sintetiche,
+  ruolo `newray_app` senza BYPASSRLS, controllo negativo obbligatorio
+  per RLS vitale, nessuna promessa assoluta, superfici future esplicite
+  come "rimandate").
+- `docs/security/threat-model.md`: perimetro (local-first Linux, un
+  profilo, loopback), attori (owner/member/stranger/anonimo/app_role/
+  worker/rete_esterna), bene protetto, minacce coperte per identità,
+  isolamento RLS, run, eventi, qualifica ed egress, righe rimandate
+  per superfici non implementate.
+- `docs/security/controls.md`: matrice controlli con puntatore
+  `file::funzione` al test che lo esercita e colonna **Negativo** per
+  i controlli con controllo-negativo che dimostrano la reattività.
+
+Suite:
+
+- `backend/tests/integration/adversarial/conftest.py`:
+  `hostile_client` è un `TestClient` sull'app completa con
+  `EchoChatModel` + worker durevoli + reader eventi, tutto su
+  PostgreSQL reale, con controllo esplicito dei cookie (nessun
+  auto-follow-redirect). Helper `bootstrap_owner`, `create_conversation`,
+  `seed_assistant_profile`.
+- `test_identity_boundaries.py` (6 test): anonimo 401 su tutte le route
+  protette; cookie revocato → SESSION_INVALID anche se ripresentato;
+  `owner_id`/`organization_id`/`id` iniettati nel body → ignorati;
+  `X-User-Id`/`X-Role` iniettati → ignorati; conversation id casuale →
+  404 uniforme (nessuna informazione trapela); **controllo negativo**
+  che dimostra che il body non influenza lo scope (`test_negative_id_body_bypass_attivo`).
+- `test_conversation_isolation.py` (4 test): GET/PATCH/DELETE su id
+  fabbricato → 404 uniforme; `messages` di conversazione ignota →
+  404; POST message dopo revoca → 401; DELETE su id inesistente → 404
+  (non 204 che indicherebbe leak di scope).
+- `test_run_authorization.py` (7 test): GET run id ignoto → 404;
+  GET events di altro scope → 404 (anche con Last-Event-ID); cancel
+  di run altrui → 404; Idempotency-Key **non** condivisa tra scope
+  (dopo revoca, anonimo → 401 anche con la stessa chiave); scope
+  estraneo su `runs` non vede né aggiorna (SELECT+UPDATE rowcount 0);
+  `run_events` immutabili (UPDATE/DELETE dal ruolo applicativo →
+  `ProgrammingError` dal grant); **controllo negativo** che dimostra
+  che lo scope corretto vede il proprio run (regressione RLS
+  rileverebbe il caso).
+- `test_egress_policy.py` (6 test): HttpClient non segue redirect
+  (MockTransport verifica che una 302 verso `malicious.example` **non**
+  produca una seconda request); costruttore rifiuta timeout non
+  positivi; Settings rifiuta `NEWRAY_OLLAMA_BASE_URL` con schema
+  non-http/s o senza host; bind non-loopback senza TLS rifiutato;
+  `SameOriginMiddleware` respinge origine estranea; `public_origin`
+  con path/query/credentials rifiutato.
+
+Esecuzioni (26/09/2026, cluster PostgreSQL 16 + pgvector locale):
+
+- `uv run pytest -q tests/unit tests/contracts`: **377 passed**, 2
+  warning di terze parti.
+- `uv run pytest -q tests/integration` (include `adversarial/`):
+  **102 passed** (+23 nuovi test avversariali), 2 warning.
+- `uv run ruff check`, `uv run ruff format --check`, `uv run mypy src`
+  (81 file), checker architettura (81 file): tutti verdi.
+
+Nessun segreto, DSN, path privato o payload utente reale compare nei
+report; le fixture sono sintetiche (`display_name="Ada"`,
+`credential="test-passphrase-1234"`). La suite non è un penetration
+test universale: copre le proprietà vitali già in codice. Le superfici
+di P-08 (allegati), P-09 (documenti), P-10 (visione), P-11 (retrieval),
+P-13 (memoria), P-15/16 (workflow/skill), P-18 (distribuzione) entreranno
+con la propria slice e portano ognuna la propria riga in `controls.md`.
+
+Rimasti da fare per la chiusura formale di P-17 (dopo le slice
+dipendenti):
+
+- Copertura di prompt injection su testo/documenti/immagini quando P-08
+  → P-10 saranno implementate.
+- Copertura di path/link injection sui parser degli allegati (P-08).
+- Cancellazione a cascata su cache/export/indici/memoria/skill (P-13).
+- Egress default-deny a livello processo/rete (non solo applicativo)
+  con verifica su un container isolato (P-18).
 
 ### P-18 — Distribuzione locale, supply chain, backup e igiene
 
