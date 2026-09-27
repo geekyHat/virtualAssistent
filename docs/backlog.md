@@ -461,8 +461,16 @@ wall-clock, claim atomico due-worker, lease scaduto con fence che sale,
 snapshot invalido → FAILED, persistenza fallita → FAILED). Nuovi test
 integrazione in `tests/integration/test_runs_worker.py` (claim + fencing,
 checkpoint + complete sotto RLS, cancel idempotente, grant di colonna)
-**non ancora eseguiti** — richiedono il cluster PostgreSQL con ruoli
-`newray_migrate`/`newray_app` avviato. Restano da chiudere per P-05:
+verdi 4/4 su PostgreSQL 16.13 + pgvector 0.6.0 locale sulla porta 5433;
+suite integrazione completa 70/70 passed (63 baseline + 4 nuovi P-05 + 3
+esistenti test_rls_runs), nessuna regressione. La prima esecuzione ha
+smascherato un difetto della funzione `runs_claim_next` sotto FORCE RLS:
+la SECURITY DEFINER gira come `newray_migrate` ma la policy scoped filtrava
+comunque le righe → nessun claim. Rimedio nella stessa migrazione 0010:
+policy permissiva `runs_migrate_bypass` ristretta a `current_user =
+'newray_migrate'`. Il ruolo applicativo `newray_app` non soddisfa la
+condizione, quindi la sua RLS scoped resta l'unica visibile alle route
+pubbliche. Restano da chiudere per P-05:
 deadline in token/turni oltre al wall-clock, integrazione end-to-end
 browser→API→worker→DB→Ollama con Gemma, prova di contesa GPU
 applicativa con due processi worker sullo stesso host, rapporto di

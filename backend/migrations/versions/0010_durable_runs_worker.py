@@ -40,9 +40,20 @@ def upgrade() -> None:
         "updated_at, started_at, finished_at, cancel_requested_at, "
         "heartbeat_at, error_code, deadline_at) ON runs TO newray_app"
     )
+    # RLS FORCE si applica anche al proprietario: aggiungo una policy
+    # permissiva ristretta al ruolo delle migrazioni, unico contesto in cui
+    # `runs_claim_next` (SECURITY DEFINER) gira. Il ruolo applicativo
+    # `newray_app` non soddisfa questa condizione, quindi non riceve alcun
+    # bypass — la sua RLS scoped resta l'unica visibile alle route pubbliche.
+    op.execute(
+        "CREATE POLICY runs_migrate_bypass ON runs AS PERMISSIVE FOR ALL "
+        "TO PUBLIC USING (current_user = 'newray_migrate') "
+        "WITH CHECK (current_user = 'newray_migrate')"
+    )
     # Claim atomico cross-utente: SECURITY DEFINER lo fa girare come il
-    # proprietario delle migrazioni, bypassando la RLS FORCE dei run. Gli
-    # aggiornamenti successivi restano sotto RLS con lo scope del run.
+    # proprietario delle migrazioni; la policy sopra gli concede l'accesso a
+    # tutte le righe. Gli aggiornamenti successivi restano sotto RLS con lo
+    # scope del run.
     op.execute(
         """
         CREATE OR REPLACE FUNCTION runs_claim_next(
@@ -92,6 +103,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP FUNCTION IF EXISTS runs_claim_next(UUID, TIMESTAMPTZ, TIMESTAMPTZ)")
+    op.execute("DROP POLICY IF EXISTS runs_migrate_bypass ON runs")
     op.execute("DROP INDEX IF EXISTS runs_claim_idx")
     op.execute(
         """
