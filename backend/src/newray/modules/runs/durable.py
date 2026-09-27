@@ -110,6 +110,36 @@ class ClaimedRun:
     fence: int
 
 
+class ComputeLease(Protocol):
+    """Serializza l'accesso alla risorsa di inference (GPU) fra processi
+    sullo stesso host: solo il detentore corrente può aprire uno stream.
+
+    Il default di produzione è un lock avvisorio a livello file system
+    (rilasciato automaticamente dal kernel se il processo muore, quindi il
+    recupero è naturale). I test usano fake in memoria; un no-op esiste per
+    i test unit che non simulano la contesa.
+    """
+
+    def try_acquire(self) -> bool:
+        """Prova a prendere il lease; ``False`` se un altro lo detiene."""
+        ...
+
+    def release(self) -> None:
+        """Rilascia il lease se detenuto (idempotente)."""
+        ...
+
+
+class NoopComputeLease:
+    """Compute lease che concede sempre: solo per i test unit che
+    non simulano contesa e per contesti single-process controllati."""
+
+    def try_acquire(self) -> bool:
+        return True
+
+    def release(self) -> None:
+        return None
+
+
 class RunStore(Protocol):
     def enqueue(self, run: DurableRun) -> DurableRun:
         """Atomicità della ricevuta scoped; payload diverso = Conflict."""

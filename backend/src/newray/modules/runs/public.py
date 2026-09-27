@@ -15,7 +15,9 @@ from newray.modules.runs.domain import (
 from newray.modules.runs.durable import (
     TERMINAL_STATES,
     ClaimedRun,
+    ComputeLease,
     DurableRun,
+    NoopComputeLease,
     RunState,
     RunStore,
 )
@@ -32,6 +34,8 @@ __all__ = [
     "InlineRunService",
     "PreparedInlineRun",
     "ClaimedRun",
+    "ComputeLease",
+    "NoopComputeLease",
     "DurableRun",
     "RunState",
     "RunStore",

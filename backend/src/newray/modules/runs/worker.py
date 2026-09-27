@@ -1,11 +1,14 @@
 """Worker P-05: consuma la coda dei run durevoli.
 
 Ownership: modulo ``runs``. Il worker è un processo separato dal servizio
-HTTP (avviato dal launcher, `bootstrap/worker_main.py`). Un solo worker
-per macchina in questa slice: garantisce l'invariante "un'inference
-generativa attiva per risorsa" senza serializzazione OS-level (P-18).
-Fencing e claim atomico proteggono comunque contro un vecchio processo
-sopravvissuto.
+HTTP (avviato dal launcher, `bootstrap/worker_main.py`). L'invariante
+"un'inference generativa attiva per risorsa" è tenuta da un ``ComputeLease``
+(default: ``FsComputeLease`` con ``fcntl.flock`` non-bloccante su
+``$NEWRAY_STATE_DIR/compute.lock``): due processi worker sullo stesso host
+si serializzano, e se il processo detentore muore il kernel rilascia il
+lock. Fencing e claim atomico proteggono in aggiunta contro un vecchio
+processo sopravvissuto che tenti di scrivere. La serializzazione multi-host
+resta ambito di P-18 (deployment).
 
 Nessuna transazione DB resta aperta durante l'inference; heartbeat e
 checkpoint sono unità autonome. Alla terminazione onesta il worker chiama
@@ -36,7 +39,14 @@ from newray.modules.models import (
     StreamEvent,
 )
 
-from .durable import DurableRun, LeaseLost, RunAlreadyTerminal, RunStore
+from .durable import (
+    ComputeLease,
+    DurableRun,
+    LeaseLost,
+    NoopComputeLease,
+    RunAlreadyTerminal,
+    RunStore,
+)
 
 logger = logging.getLogger("newray.runs.worker")
 
@@ -98,6 +108,7 @@ class DurableRunWorker:
         config: WorkerConfig | None = None,
         clock: Clock | None = None,
         worker_id: uuid.UUID | None = None,
+        compute_lease: ComputeLease | None = None,
     ) -> None:
         self._store = store
         self._chat_model = chat_model
@@ -105,6 +116,7 @@ class DurableRunWorker:
         self._config = config or WorkerConfig()
         self._clock = clock or SystemClock()
         self.worker_id = worker_id or new_id()
+        self._compute_lease = compute_lease or NoopComputeLease()
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -129,18 +141,28 @@ class DurableRunWorker:
         logger.info("worker %s fermato", self.worker_id)
 
     async def _tick(self) -> bool:
-        now = self._clock.now()
-        lease_until = now + self._config.lease_ttl
-        claim = await asyncio.to_thread(
-            self._store.claim_next,
-            worker_id=self.worker_id,
-            lease_until=lease_until,
-            now=now,
-        )
-        if claim is None:
+        # Compute lease prima del claim: se un altro worker tiene il lock
+        # sull'inference, non prendere il run — resterà in coda per la prossima
+        # finestra libera. Il lock è a livello file system, cross-processo su
+        # host singolo, rilasciato dal kernel se il processo muore.
+        acquired = await asyncio.to_thread(self._compute_lease.try_acquire)
+        if not acquired:
             return False
-        await self._process(claim.run, claim.fence)
-        return True
+        try:
+            now = self._clock.now()
+            lease_until = now + self._config.lease_ttl
+            claim = await asyncio.to_thread(
+                self._store.claim_next,
+                worker_id=self.worker_id,
+                lease_until=lease_until,
+                now=now,
+            )
+            if claim is None:
+                return False
+            await self._process(claim.run, claim.fence)
+            return True
+        finally:
+            await asyncio.to_thread(self._compute_lease.release)
 
     async def _process(self, run: DurableRun, fence: int) -> None:
         scope = Scope(run.organization_id, run.owner_id)

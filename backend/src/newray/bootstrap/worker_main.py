@@ -1,9 +1,9 @@
 """Entrypoint del worker P-05: processo separato dall'API.
 
-Un solo worker per macchina in questa slice; garantisce l'invariante "una
-sola inference generativa attiva" senza serializzazione OS-level (che
-resta a P-18). Il fencing atomico protegge contro processi zombie del
-worker precedente.
+Un ``FsComputeLease`` avvisorio su ``$NEWRAY_DATA_DIR/state/compute.lock``
+serializza due processi worker sullo stesso host — solo il detentore può
+aprire uno stream. Il fencing atomico protegge inoltre contro processi
+zombie del worker precedente che tentino di scrivere sul DB.
 
 Il segnale SIGTERM chiude il worker in modo ordinato: il run in corso
 resta con lease valido; alla riacquisizione dopo TTL un nuovo worker
@@ -25,6 +25,7 @@ from newray.modules.conversations.adapters.postgres import (
     PostgresMessageStore,
 )
 from newray.modules.runs import DurableRunWorker
+from newray.modules.runs.adapters.compute_lease import FsComputeLease
 from newray.modules.runs.adapters.postgres import PostgresRunStore
 
 from .settings import Settings
@@ -59,10 +60,12 @@ async def _run() -> None:
             PostgresMessageStore(engine),
             SystemClock(),
         )
+        compute_lease = FsComputeLease(settings.data_dir / "state" / "compute.lock")
         worker = DurableRunWorker(
             store=PostgresRunStore(engine),
             chat_model=chat_model,
             conversations=conversations,
+            compute_lease=compute_lease,
         )
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):

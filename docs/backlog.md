@@ -471,10 +471,33 @@ policy permissiva `runs_migrate_bypass` ristretta a `current_user =
 'newray_migrate'`. Il ruolo applicativo `newray_app` non soddisfa la
 condizione, quindi la sua RLS scoped resta l'unica visibile alle route
 pubbliche. Restano da chiudere per P-05:
-integrazione end-to-end browser→API→worker→DB→Ollama con Gemma, prova di
-contesa GPU applicativa con due processi worker sullo stesso host,
-rapporto di chiusura con evidenze e passaggio ufficiale del ticket a
-Completato.
+integrazione end-to-end browser→API→worker→DB→Ollama con Gemma, rapporto
+di chiusura con evidenze e passaggio ufficiale del ticket a Completato.
+
+**Quarta slice P-05 (27/09/2026) — compute lease per la contesa GPU.**
+L'invariante "un'inference generativa attiva per risorsa" è tenuta ora
+da un lock avvisorio `fcntl.flock` esclusivo non-bloccante su
+`$NEWRAY_DATA_DIR/state/compute.lock` (`FsComputeLease` in
+`modules/runs/adapters/compute_lease.py`, implementa il protocollo
+`ComputeLease` del kernel del modulo). Il worker chiama `try_acquire`
+prima del `claim_next`: se un altro processo detiene il lock, salta il
+tick e non prende il run — che resta in coda. Il kernel rilascia il
+flock alla chiusura del fd, quindi il crash del detentore libera
+automaticamente il lease (recupero senza intervento applicativo).
+Copertura test in `tests/unit/test_compute_lease.py`: esclusività su
+due lease sullo stesso file, recupero dopo chiusura del fd, e due
+worker in-process con `FakeRunStore` che si serializzano — il secondo
+non tenta neanche il claim finché il primo detiene il lease. Il worker
+launcher `bootstrap/worker_main.py` cabla `FsComputeLease` di default;
+il worker in-process resta configurabile via costruttore (`NoopComputeLease`
+per unit che non simulano contesa). Limiti onesti: cross-host non
+protetto (ambito P-18). File modificati:
+`backend/src/newray/modules/runs/{durable,worker,public}.py`,
+`backend/src/newray/modules/runs/adapters/compute_lease.py`,
+`backend/src/newray/bootstrap/worker_main.py`,
+`backend/tests/unit/test_compute_lease.py`. Suite completa verde:
+400 test passed (unit 235 + contracts 95 + integration 70,
++3 unit rispetto alla terza slice), zero regressioni.
 
 **Terza slice P-05 (27/09/2026) — safety net token budget.**
 Il cap autorevole di token resta `num_predict = max_output_tokens` di
