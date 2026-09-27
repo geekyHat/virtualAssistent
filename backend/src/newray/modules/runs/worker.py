@@ -42,6 +42,18 @@ logger = logging.getLogger("newray.runs.worker")
 
 
 class WorkerConfig:
+    """Parametri del worker.
+
+    ``token_safety_chars_per_token`` è una safety net contro un runtime che
+    ignora ``num_predict`` (=``max_output_tokens``): il cap autorevole di
+    token resta Ollama, che chiude con ``finish_reason='length'`` — un
+    COMPLETED onesto. Se però il partial cresce oltre
+    ``max_output_tokens * token_safety_chars_per_token`` caratteri, il
+    worker chiude come FAILED con ``TOKEN_BUDGET_EXCEEDED``: il valore
+    generoso di default (20) intercetta solo runaway reali, non troncamenti
+    di stile verboso.
+    """
+
     __slots__ = (
         "poll_interval",
         "lease_ttl",
@@ -49,6 +61,7 @@ class WorkerConfig:
         "checkpoint_min_interval",
         "cancel_check_interval",
         "inactivity_timeout",
+        "token_safety_chars_per_token",
     )
 
     def __init__(
@@ -60,13 +73,17 @@ class WorkerConfig:
         checkpoint_min_interval: timedelta = timedelta(milliseconds=500),
         cancel_check_interval: timedelta = timedelta(seconds=1),
         inactivity_timeout: timedelta = timedelta(seconds=60),
+        token_safety_chars_per_token: int = 20,
     ) -> None:
+        if token_safety_chars_per_token < 1:
+            raise ValueError("token_safety_chars_per_token deve essere >= 1")
         self.poll_interval = poll_interval
         self.lease_ttl = lease_ttl
         self.heartbeat_interval = heartbeat_interval
         self.checkpoint_min_interval = checkpoint_min_interval
         self.cancel_check_interval = cancel_check_interval
         self.inactivity_timeout = inactivity_timeout
+        self.token_safety_chars_per_token = token_safety_chars_per_token
 
 
 class DurableRunWorker:
@@ -180,6 +197,13 @@ class DurableRunWorker:
                                 "contenuto ricevuto dopo il terminale del modello"
                             )
                         accumulated += event.text
+                        if _over_token_budget(
+                            accumulated,
+                            request.max_tokens,
+                            self._config.token_safety_chars_per_token,
+                        ):
+                            stop_reason = "token_budget"
+                            break
                         if (
                             self._clock.now() - last_checkpoint
                             >= self._config.checkpoint_min_interval
@@ -233,6 +257,12 @@ class DurableRunWorker:
         if stop_reason == "deadline":
             await self._finalize_failed(
                 scope, run, fence, accumulated, "INFERENCE_TIMEOUT", "wall-clock deadline superata"
+            )
+            return
+        if stop_reason == "token_budget":
+            await self._finalize_failed(
+                scope, run, fence, accumulated, "TOKEN_BUDGET_EXCEEDED",
+                "runtime non ha onorato num_predict; partial oltre la safety net",
             )
             return
         if completion is None:
@@ -391,6 +421,20 @@ class DurableRunWorker:
             )
         except LeaseLost:
             logger.warning("lease perso finalizzando cancel su run %s", run.id)
+
+
+def _over_token_budget(
+    accumulated: str, max_tokens: int | None, chars_per_token: int
+) -> bool:
+    """Safety net: partial oltre `max_tokens * chars_per_token` = runaway.
+
+    Il cap autorevole di token resta ``num_predict`` di Ollama; questa
+    funzione non tronca un'inference regolare, ma protegge il worker da
+    runtime che non chiudono con `finish_reason='length'`.
+    """
+    if max_tokens is None:
+        return False
+    return len(accumulated) > max_tokens * chars_per_token
 
 
 def _build_chat_request(snapshot: Mapping[str, object]) -> ChatRequest:

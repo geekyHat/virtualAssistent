@@ -471,10 +471,27 @@ policy permissiva `runs_migrate_bypass` ristretta a `current_user =
 'newray_migrate'`. Il ruolo applicativo `newray_app` non soddisfa la
 condizione, quindi la sua RLS scoped resta l'unica visibile alle route
 pubbliche. Restano da chiudere per P-05:
-deadline in token/turni oltre al wall-clock, integrazione end-to-end
-browser→API→worker→DB→Ollama con Gemma, prova di contesa GPU
-applicativa con due processi worker sullo stesso host, rapporto di
-chiusura con evidenze e passaggio ufficiale del ticket a Completato.
+integrazione end-to-end browser→API→worker→DB→Ollama con Gemma, prova di
+contesa GPU applicativa con due processi worker sullo stesso host,
+rapporto di chiusura con evidenze e passaggio ufficiale del ticket a
+Completato.
+
+**Terza slice P-05 (27/09/2026) — safety net token budget.**
+Il cap autorevole di token resta `num_predict = max_output_tokens` di
+Ollama: quando lo raggiunge il runtime chiude con `finish_reason='length'`
+— un COMPLETED onesto, non un guasto (test unitario dedicato). Il worker
+aggiunge una safety net contro un runtime che ignori quel cap: se
+`len(partial_text) > max_output_tokens * token_safety_chars_per_token`
+(default generoso 20), finalizza come FAILED con codice
+`TOKEN_BUDGET_EXCEEDED`, preservando il partial per riconciliazione.
+Non è una "deadline in token" precisa a livello di worker — sarebbe
+possibile solo con conteggi per-chunk che Ollama non emette — ma
+intercetta runaway reali senza troncare inference regolari. La deadline
+in turni (multi-round) resta N/A finché non esiste il tool loop (P-07).
+File: `backend/src/newray/modules/runs/worker.py`,
+`backend/tests/unit/test_durable_worker.py` (+2 test). Suite completa
+verde: 397 test passed (unit 232 + contracts 95 + integration 70,
++2 unit rispetto alla seconda slice), zero regressioni.
 
 ### P-06 — Eventi durevoli, stop e migrazione della chat browser
 

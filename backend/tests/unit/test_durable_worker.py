@@ -519,6 +519,79 @@ def test_worker_registra_errore_su_snapshot_invalido() -> None:
     _run_async(scenario())
 
 
+def test_safety_net_token_budget_intercetta_runaway() -> None:
+    """Se il runtime ignora num_predict e continua a produrre, il worker
+    chiude come FAILED con TOKEN_BUDGET_EXCEEDED. Il cap autorevole resta
+    Ollama; questo è solo il guardrail lato worker.
+    """
+    async def scenario() -> None:
+        store = FakeRunStore()
+        run = _queued_run()
+        store.put(run)
+        # max_output_tokens=128 nel snapshot; con moltiplicatore 4 il budget
+        # è 128*4=512 caratteri. Un ContentDelta da 1024 caratteri lo supera.
+        long_text = "x" * 1024
+        chat = ScriptedChatModel([
+            ContentDelta(long_text),
+            # Non arriverà mai: il worker interrompe prima.
+            Completion(finish_reason="stop", prompt_tokens=1, completion_tokens=99999),
+        ])
+        conversations = RecordingConversations()
+        worker = _make_worker(
+            store, chat, conversations,
+            config=WorkerConfig(
+                poll_interval=0.01, lease_ttl=timedelta(seconds=30),
+                heartbeat_interval=timedelta(seconds=10),
+                checkpoint_min_interval=timedelta(0),
+                cancel_check_interval=timedelta(milliseconds=50),
+                inactivity_timeout=timedelta(seconds=60),
+                token_safety_chars_per_token=4,
+            ),
+        )
+
+        await worker._tick()
+
+        persisted = store.snapshot(run.id)
+        assert persisted.state == RunState.FAILED
+        assert persisted.error_code == "TOKEN_BUDGET_EXCEEDED"
+        # Il partial resta persistito per riconciliazione, non è successo.
+        assert persisted.partial_text == long_text
+        assert conversations.calls == []
+
+    _run_async(scenario())
+
+
+def test_finish_reason_length_e_un_completamento_onesto() -> None:
+    """Ollama chiude con finish_reason='length' quando num_predict è raggiunto.
+    Non è un guasto: è un COMPLETED con metriche persistite.
+    """
+    async def scenario() -> None:
+        store = FakeRunStore()
+        run = _queued_run()
+        store.put(run)
+        chat = ScriptedChatModel([
+            ContentDelta("output limitato"),
+            Completion(
+                finish_reason="length", prompt_tokens=3, completion_tokens=128
+            ),
+        ])
+        conversations = RecordingConversations()
+        worker = _make_worker(store, chat, conversations)
+
+        await worker._tick()
+
+        persisted = store.snapshot(run.id)
+        assert persisted.state == RunState.COMPLETED
+        assert persisted.finish_reason == "length"
+        assert persisted.completion_tokens == 128
+        assert persisted.error_code is None
+        # Il messaggio troncato entra comunque nella conversazione.
+        assert len(conversations.calls) == 1
+        assert conversations.calls[0][2] == "output limitato"
+
+    _run_async(scenario())
+
+
 def test_worker_fallisce_se_persistenza_messaggi_va_male() -> None:
     async def scenario() -> None:
         store = FakeRunStore()
