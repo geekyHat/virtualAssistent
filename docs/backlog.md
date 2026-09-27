@@ -418,6 +418,56 @@ ruff e mypy verdi. Il cluster PostgreSQL temporaneo usato per queste prove
 checkpoint del parziale, endpoint/snapshot pubblico, restart e prove di
 contenzione GPU prima della chiusura P-05.
 
+**Seconda slice P-05 (27/09/2026) — worker, endpoint e fencing pieni.**
+La migrazione `0010_durable_runs_worker` aggiunge le colonne di stato
+(`deadline_at`, `started_at`, `finished_at`, `cancel_requested_at`,
+`heartbeat_at`, `error_code`), l'indice parziale sui candidati
+(`state IN ('queued','running')`) e la funzione `runs_claim_next`
+SECURITY DEFINER per il claim atomico cross-utente (l'unico bypass RLS,
+gli aggiornamenti successivi restano scoped). `PostgresRunStore` acquisisce
+metodi di ciclo di vita — `claim_next`, `heartbeat`, `checkpoint`, `complete`,
+`fail`, `finalize_cancelled`, `interrupt_stale`, `mark_cancel_requested` —
+che verificano `(lease_owner, fence)` prima di ogni scrittura; sollevano
+`LeaseLost` o `RunAlreadyTerminal` (kernel-level, non adapter) altrimenti.
+`DurableRunWorker` (in `modules/runs/worker.py`) è un ciclo asyncio che
+consuma un run alla volta: pattern select-like fra `stream.__anext__()`
+e un timer di controllo (evita che `asyncio.wait_for` cancelli il generator
+del modello), heartbeat e checkpoint del parziale, deadline wall-clock,
+finalizzazione onesta (COMPLETED/FAILED/CANCELLED/INTERRUPTED) con
+metriche vendor persistite solo quando reali. La persistenza dei messaggi
+al completamento passa da `ConversationService.add_exchange`, con
+idempotency + request_hash già presenti nello snapshot: nessun prompt
+orfano, nessun doppio messaggio. Nuovo entrypoint `bootstrap/worker_main.py`
+per il **processo separato dall'API**, avviato da `scripts/start_local.py`
+insieme al server; SIGTERM/SIGINT chiudono in modo ordinato lasciando il
+lease scadere naturalmente. Nuove route pubbliche
+`POST /api/v1/conversations/{id}/runs`, `GET /api/v1/runs/{id}`,
+`POST /api/v1/runs/{id}/cancel`, con DTO `RunSnapshotDTO` (senza contesto
+interno) e contratti rigenerati. File principali:
+`backend/migrations/versions/0010_durable_runs_worker.py`,
+`backend/src/newray/modules/runs/{durable,durable_application,worker}.py`,
+`backend/src/newray/modules/runs/adapters/postgres.py`,
+`backend/src/newray/interfaces/http/{dto/runs.py,routes/runs.py}`,
+`backend/src/newray/bootstrap/{api.py,worker_main.py}`,
+`scripts/start_local.py`, `contracts/openapi.json`,
+`web/src/shared/contracts/api.d.ts`. Prove eseguite localmente
+(cluster PostgreSQL di integrazione non disponibile in questo container):
+`ruff check` verde su `src/` e `tests/`, `mypy` verde su 74 sorgenti,
+`check_architecture.py` 74 file verdi (kernel/porte/adapter separati),
+`generate_contracts.py --check` verde, 325 test unit/contract passed
+(7 nuovi in `tests/unit/test_durable_worker.py` — ciclo completo del worker
+con fake store: run completato con metriche, cancel onorato, deadline
+wall-clock, claim atomico due-worker, lease scaduto con fence che sale,
+snapshot invalido → FAILED, persistenza fallita → FAILED). Nuovi test
+integrazione in `tests/integration/test_runs_worker.py` (claim + fencing,
+checkpoint + complete sotto RLS, cancel idempotente, grant di colonna)
+**non ancora eseguiti** — richiedono il cluster PostgreSQL con ruoli
+`newray_migrate`/`newray_app` avviato. Restano da chiudere per P-05:
+deadline in token/turni oltre al wall-clock, integrazione end-to-end
+browser→API→worker→DB→Ollama con Gemma, prova di contesa GPU
+applicativa con due processi worker sullo stesso host, rapporto di
+chiusura con evidenze e passaggio ufficiale del ticket a Completato.
+
 ### P-06 — Eventi durevoli, stop e migrazione della chat browser
 
 - **Stato / priorità:** Da fare / P0.

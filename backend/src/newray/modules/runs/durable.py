@@ -10,7 +10,20 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Protocol
 
+from newray.kernel.errors import DomainError
 from newray.kernel.identity import Scope
+
+
+class LeaseLost(DomainError):
+    """Il worker non detiene più il fence: un altro worker ha preso il run."""
+
+    code = "LEASE_LOST"
+
+
+class RunAlreadyTerminal(DomainError):
+    """Il run è già in stato terminale; nessuna nuova scrittura ammessa."""
+
+    code = "RUN_ALREADY_TERMINAL"
 
 
 class RunState(StrEnum):
@@ -21,6 +34,11 @@ class RunState(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     INTERRUPTED = "interrupted"
+
+
+TERMINAL_STATES = frozenset(
+    {RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED, RunState.INTERRUPTED}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,9 +61,19 @@ class DurableRun:
     fence: int
     created_at: datetime
     updated_at: datetime
+    deadline_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    error_code: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "snapshot", freeze_json(self.snapshot))
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.state in TERMINAL_STATES
 
 
 def freeze_json(value: object) -> object:
@@ -70,6 +98,18 @@ def thaw_json(value: object) -> object:
     return value
 
 
+@dataclass(frozen=True, slots=True)
+class ClaimedRun:
+    """Ricevuta di claim: worker vincolato a run e fence.
+
+    Il fence emesso qui è l'unico valido per checkpoint/finalize/heartbeat
+    del worker: un vecchio worker con fence obsoleto non può più scrivere.
+    """
+
+    run: DurableRun
+    fence: int
+
+
 class RunStore(Protocol):
     def enqueue(self, run: DurableRun) -> DurableRun:
         """Atomicità della ricevuta scoped; payload diverso = Conflict."""
@@ -80,3 +120,91 @@ class RunStore(Protocol):
     def find_by_key(
         self, scope: Scope, conversation_id: uuid.UUID, idempotency_key: str
     ) -> DurableRun | None: ...
+
+    def claim_next(
+        self,
+        *,
+        worker_id: uuid.UUID,
+        lease_until: datetime,
+        now: datetime,
+    ) -> ClaimedRun | None:
+        """Prende in carico atomicamente un run `queued` o un `running` con
+        lease scaduto; incrementa il fence per invalidare il vecchio worker.
+        """
+        ...
+
+    def heartbeat(
+        self,
+        *,
+        scope: Scope,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        lease_until: datetime,
+        now: datetime,
+    ) -> DurableRun: ...
+
+    def checkpoint(
+        self,
+        *,
+        scope: Scope,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        partial_text: str,
+        lease_until: datetime,
+        now: datetime,
+    ) -> DurableRun: ...
+
+    def complete(
+        self,
+        *,
+        scope: Scope,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        partial_text: str,
+        finish_reason: str,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        eval_duration_ns: int | None,
+        now: datetime,
+    ) -> DurableRun: ...
+
+    def fail(
+        self,
+        *,
+        scope: Scope,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        error_code: str,
+        finish_reason: str,
+        partial_text: str,
+        now: datetime,
+    ) -> DurableRun: ...
+
+    def mark_cancel_requested(
+        self, scope: Scope, run_id: uuid.UUID, now: datetime
+    ) -> DurableRun: ...
+
+    def finalize_cancelled(
+        self,
+        *,
+        scope: Scope,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        partial_text: str,
+        now: datetime,
+    ) -> DurableRun: ...
+
+    def interrupt_stale(
+        self,
+        *,
+        scope: Scope,
+        run_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        fence: int,
+        now: datetime,
+    ) -> DurableRun: ...

@@ -408,6 +408,18 @@ def launch(supervisor: Supervisor) -> None:
             supervisor.wait_ready(lambda: api_ready(api, host), child, "API")
         else:
             print("API già attiva: riutilizzo il servizio.", flush=True)
+        # Worker durevole P-05: processo separato dall'API, riavviabile
+        # senza tirare giù la chat. Un solo worker per macchina: fencing
+        # atomico protegge da eventuali processi zombie.
+        worker_env = dict(env)
+        worker_env.pop(MIGRATION_DSN, None)
+        worker_env.pop("NEWRAY_DB_MIGRATE_PASSWORD", None)
+        print("Avvio worker durevole…", flush=True)
+        supervisor.start(
+            [sys.executable, "-m", "newray.bootstrap.worker_main"],
+            worker_env,
+            ROOT / "backend",
+        )
         if not web_running:
             lock_hash = hashlib.sha256((ROOT / "web/package-lock.json").read_bytes()).hexdigest()
             stamp = ROOT / "web/node_modules/.newray-lock"

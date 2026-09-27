@@ -1,8 +1,7 @@
-"""Prima slice P-05: creazione idempotente e lettura di snapshot durevoli.
+"""Caso d'uso P-05: creazione idempotente, snapshot e cancel dei run durevoli.
 
-La coda non è ancora consumata dal worker: finché claim, fencing e
-riconciliazione non sono qualificati, questa slice resta interna e non
-pubblica una route che prometterebbe esecuzione.
+Il worker (``modules/runs/worker.py``) consuma la coda, questo servizio è la
+sola porta di ingresso dei run per l'HTTP.
 """
 
 from __future__ import annotations
@@ -12,8 +11,9 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+from newray.kernel.clock import Clock, SystemClock
 from newray.kernel.errors import Conflict, NotFound
 from newray.kernel.identity import Principal, new_id
 
@@ -39,12 +39,23 @@ def _payload_hash(profile_id: uuid.UUID, content: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-class DurableRunService:
-    """Run accodati; nessun avvio automatico fino al worker P-05."""
+DEFAULT_WALL_DEADLINE = timedelta(minutes=10)
 
-    def __init__(self, store: RunStore, inline: InlineRunService) -> None:
+
+class DurableRunService:
+    """Run accodati; il worker in-process/side-car ne esegue la generazione."""
+
+    def __init__(
+        self,
+        store: RunStore,
+        inline: InlineRunService,
+        clock: Clock | None = None,
+        wall_deadline: timedelta = DEFAULT_WALL_DEADLINE,
+    ) -> None:
         self._store = store
         self._inline = inline
+        self._clock = clock or SystemClock()
+        self._wall_deadline = wall_deadline
 
     async def create(
         self,
@@ -85,8 +96,10 @@ class DurableRunService:
             "context_truncated": prepared.context_truncated,
             "context_message_count": prepared.context_message_count,
             "context_character_count": prepared.context_character_count,
+            "request_hash": prepared.request_hash,
         }
-        now = datetime.now(UTC)
+        now = self._clock.now()
+        deadline_at = now + self._wall_deadline
         run = DurableRun(
             id=new_id(),
             conversation_id=conversation_id,
@@ -106,6 +119,7 @@ class DurableRunService:
             fence=0,
             created_at=now,
             updated_at=now,
+            deadline_at=deadline_at,
         )
         return await asyncio.to_thread(self._store.enqueue, run)
 
@@ -114,3 +128,14 @@ class DurableRunService:
         if run is None:
             raise NotFound("run non trovato")
         return run
+
+    async def request_cancel(self, principal: Principal, run_id: uuid.UUID) -> DurableRun:
+        now = self._clock.now()
+        return await asyncio.to_thread(
+            self._store.mark_cancel_requested, principal.scope, run_id, now
+        )
+
+
+def utc_now() -> datetime:
+    """Alias esplicito UTC per i test fake."""
+    return datetime.now(UTC)

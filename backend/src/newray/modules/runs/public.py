@@ -12,8 +12,15 @@ from newray.modules.runs.domain import (
     InlineRunEvent,
     PreparedInlineRun,
 )
-from newray.modules.runs.durable import DurableRun, RunState, RunStore
+from newray.modules.runs.durable import (
+    TERMINAL_STATES,
+    ClaimedRun,
+    DurableRun,
+    RunState,
+    RunStore,
+)
 from newray.modules.runs.durable_application import DurableRunService
+from newray.modules.runs.worker import DurableRunWorker, WorkerConfig
 
 __all__ = [
     "INLINE_CONTEXT_MAX_CHARACTERS",
@@ -24,8 +31,12 @@ __all__ = [
     "InlineRunEvent",
     "InlineRunService",
     "PreparedInlineRun",
+    "ClaimedRun",
     "DurableRun",
     "RunState",
     "RunStore",
+    "TERMINAL_STATES",
     "DurableRunService",
+    "DurableRunWorker",
+    "WorkerConfig",
 ]

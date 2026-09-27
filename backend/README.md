@@ -66,11 +66,17 @@ export NEWRAY_DATABASE_DSN="postgresql+psycopg://newray_app@127.0.0.1:5433/newra
 export NEWRAY_MIGRATION_DATABASE_URL="postgresql+psycopg://newray_migrate@127.0.0.1:5433/newray"
 uv run alembic upgrade head
 uv run python -m newray.bootstrap.main   # bind e porta dai settings (127.0.0.1:8000)
+# In un secondo terminale (P-05): worker durevole dei run.
+uv run python -m newray.bootstrap.worker_main
 ```
 
-L'avvio unico è `python -m newray.bootstrap.main` (A-07): un bind
+L'avvio unico dell'API è `python -m newray.bootstrap.main` (A-07): un bind
 non-loopback senza `NEWRAY_COOKIE_SECURE=true` viene rifiutato dai
-settings (NewRay.md §20.3). Dettaglio operativo in
+settings (NewRay.md §20.3). Il worker durevole
+(`python -m newray.bootstrap.worker_main`) è un processo separato: consuma
+la coda `/runs`, mantiene lease + fence sulle scritture e riavvia in modo
+ordinato su SIGTERM/SIGINT senza toccare l'API. `./.start` (script radice)
+avvia entrambi in un supervisor locale. Dettaglio operativo in
 [docs/operations/runtime.md](../docs/operations/runtime.md).
 
 Superficie attuale (NewRay.md §19.2):
