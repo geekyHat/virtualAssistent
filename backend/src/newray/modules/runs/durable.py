@@ -141,8 +141,14 @@ class NoopComputeLease:
 
 
 class RunStore(Protocol):
-    def enqueue(self, run: DurableRun) -> DurableRun:
-        """Atomicità della ricevuta scoped; payload diverso = Conflict."""
+    def enqueue(self, run: DurableRun, *, queue_cap: int | None = None) -> DurableRun:
+        """Atomicità della ricevuta scoped; payload diverso = Conflict.
+
+        Con ``queue_cap`` non ``None``, l'inserimento è rifiutato con
+        ``QueueFull`` se lo scope ha già ``queue_cap`` run non-terminali.
+        Il conteggio e l'insert avvengono nella stessa transazione,
+        serializzata per owner.
+        """
         ...
 
     def get(self, scope: Scope, run_id: uuid.UUID) -> DurableRun | None: ...

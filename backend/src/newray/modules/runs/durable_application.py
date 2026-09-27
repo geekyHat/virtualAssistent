@@ -51,11 +51,13 @@ class DurableRunService:
         inline: InlineRunService,
         clock: Clock | None = None,
         wall_deadline: timedelta = DEFAULT_WALL_DEADLINE,
+        queue_cap: int | None = None,
     ) -> None:
         self._store = store
         self._inline = inline
         self._clock = clock or SystemClock()
         self._wall_deadline = wall_deadline
+        self._queue_cap = queue_cap
 
     async def create(
         self,
@@ -121,7 +123,7 @@ class DurableRunService:
             updated_at=now,
             deadline_at=deadline_at,
         )
-        return await asyncio.to_thread(self._store.enqueue, run)
+        return await asyncio.to_thread(self._store.enqueue, run, queue_cap=self._queue_cap)
 
     async def get(self, principal: Principal, run_id: uuid.UUID) -> DurableRun:
         run = await asyncio.to_thread(self._store.get, principal.scope, run_id)

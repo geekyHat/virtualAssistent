@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine, Row
 
-from newray.kernel.errors import Conflict, NotFound
+from newray.kernel.errors import Conflict, NotFound, QueueFull
 from newray.kernel.identity import Scope
 
 from ..durable import (
@@ -86,16 +86,57 @@ class PostgresRunStore:
 
     # -- creazione ------------------------------------------------------
 
-    def enqueue(self, run: DurableRun) -> DurableRun:
+    def enqueue(self, run: DurableRun, *, queue_cap: int | None = None) -> DurableRun:
         scope = Scope(run.organization_id, run.owner_id)
         with self._engine.begin() as conn:
             _scope(conn, scope)
+            # Serializza i create concorrenti per lo stesso owner: due
+            # transazioni al bordo del cap non possono entrambe inserire.
+            # L'hash da 64 bit collide con probabilità trascurabile per lo
+            # spazio uuid×uuid; una collisione degrada a serializzazione più
+            # ampia, mai a violazione del cap.
+            conn.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "hashtextextended(CAST(:org AS text) || ':' "
+                    "|| CAST(:owner AS text), 0))"
+                ),
+                {"org": run.organization_id, "owner": run.owner_id},
+            )
             parent = conn.execute(
                 text("SELECT id FROM conversations WHERE id = :id FOR UPDATE"),
                 {"id": run.conversation_id},
             ).first()
             if parent is None:
                 raise NotFound("conversazione non trovata")
+            # Replay idempotente ha precedenza sul cap: chi ritenta con la
+            # stessa chiave riceve la sua ricevuta, non un rifiuto artificiale.
+            existing_by_key = conn.execute(
+                text(
+                    "SELECT " + _COLUMNS + " FROM runs WHERE conversation_id = :conversation_id "
+                    "AND idempotency_key = :idempotency_key"
+                ),
+                {
+                    "conversation_id": run.conversation_id,
+                    "idempotency_key": run.idempotency_key,
+                },
+            ).first()
+            if existing_by_key is not None:
+                if existing_by_key.payload_hash != run.payload_hash:
+                    raise Conflict("chiave di idempotenza riutilizzata con richiesta diversa")
+                return _run(existing_by_key)
+            if queue_cap is not None:
+                pending = conn.execute(
+                    text(
+                        "SELECT count(*) FROM runs "
+                        "WHERE state NOT IN "
+                        "('completed', 'failed', 'cancelled', 'interrupted')"
+                    )
+                ).scalar_one()
+                if pending >= queue_cap:
+                    raise QueueFull(
+                        f"coda piena ({pending}/{queue_cap} run non-terminali)"
+                    )
             inserted = conn.execute(
                 text(
                     "INSERT INTO runs (id, conversation_id, organization_id, owner_id, "
@@ -122,18 +163,12 @@ class PostgresRunStore:
                     "updated_at": run.updated_at,
                 },
             ).first()
-            if inserted is not None:
-                return _run(inserted)
-            existing = conn.execute(
-                text(
-                    "SELECT " + _COLUMNS + " FROM runs WHERE conversation_id = :conversation_id "
-                    "AND idempotency_key = :idempotency_key"
-                ),
-                {"conversation_id": run.conversation_id, "idempotency_key": run.idempotency_key},
-            ).one()
-            if existing.payload_hash != run.payload_hash:
-                raise Conflict("chiave di idempotenza riutilizzata con richiesta diversa")
-            return _run(existing)
+            if inserted is None:
+                # Impossibile sotto l'advisory lock: la SELECT precedente
+                # avrebbe già intercettato l'esistenza. Se accade è un
+                # errore invariante da segnalare, non da silenziare.
+                raise RuntimeError("run persistito da una transazione concorrente")
+            return _run(inserted)
 
     # -- letture --------------------------------------------------------
 

@@ -471,8 +471,37 @@ policy permissiva `runs_migrate_bypass` ristretta a `current_user =
 'newray_migrate'`. Il ruolo applicativo `newray_app` non soddisfa la
 condizione, quindi la sua RLS scoped resta l'unica visibile alle route
 pubbliche. Restano da chiudere per P-05:
+test kill/restart worker end-to-end con ripresa da checkpoint,
 integrazione end-to-end browser→API→worker→DB→Ollama con Gemma, rapporto
 di chiusura con evidenze e passaggio ufficiale del ticket a Completato.
+
+**Quinta slice P-05 (27/09/2026) — coda limitata con rifiuto immediato.**
+Nuovo settings `NEWRAY_RUNS_QUEUE_CAP` (default 8, ge=1 le=1024): cap sul
+numero di run non-terminali per scope. Decisione di prodotto: **rifiuto
+immediato** con nuovo errore `QueueFull` (kernel-level, codice
+`QUEUE_FULL`, HTTP 429, marcato retryable) invece di coda con attesa.
+Motivo: local-first single-user, l'attesa non svuota la coda. Il replay
+idempotente (stessa chiave, stesso payload) ha precedenza sul cap:
+chi ritenta riceve la sua ricevuta, mai un rifiuto artificiale. Il
+conteggio esclude i run terminali (completed/failed/cancelled/interrupted),
+quindi un run che chiude libera lo slot automaticamente. Atomicità
+garantita da `pg_advisory_xact_lock(hashtextextended(org||owner, 0))`
+nella stessa transazione di `enqueue`: due create concorrenti per lo
+stesso owner si serializzano, uno solo supera il bordo del cap. File:
+`backend/src/newray/kernel/errors.py` (nuovo `QueueFull`),
+`backend/src/newray/interfaces/http/errors.py` (mappatura 429 + retryable),
+`backend/src/newray/bootstrap/settings.py` (`runs_queue_cap`),
+`backend/src/newray/bootstrap/api.py` (wiring),
+`backend/src/newray/modules/runs/{durable,adapters/postgres,durable_application}.py`
+(protocollo `enqueue(queue_cap=...)` + impl), contratti rigenerati.
+Nuovi test: `test_queue_full_su_cap_del_servizio` (unit),
+`test_queue_cap_rifiuta_e_ignora_run_terminali` +
+`test_queue_cap_serializza_create_concorrenti` (integration su Postgres
+reale con ThreadPoolExecutor). Suite completa verde: **403 test passed**
+(unit 238 + contracts 95 + integration 72, +3 rispetto alla quarta
+slice), zero regressioni. Ruff + mypy + check_architecture (75 file)
+verdi; `generate_contracts.py --check` verde dopo la rigenerazione
+(OpenAPI e types TS aggiornati per il codice 429).
 
 **Quarta slice P-05 (27/09/2026) — compute lease per la contesa GPU.**
 L'invariante "un'inference generativa attiva per risorsa" è tenuta ora

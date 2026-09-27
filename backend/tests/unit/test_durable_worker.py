@@ -47,7 +47,9 @@ class FakeRunStore:
     def snapshot(self, run_id: uuid.UUID) -> DurableRun:
         return self._runs[run_id]
 
-    def enqueue(self, run: DurableRun) -> DurableRun:  # pragma: no cover
+    def enqueue(
+        self, run: DurableRun, *, queue_cap: int | None = None
+    ) -> DurableRun:  # pragma: no cover
         self._runs[run.id] = run
         return run
 
@@ -590,6 +592,94 @@ def test_finish_reason_length_e_un_completamento_onesto() -> None:
         assert conversations.calls[0][2] == "output limitato"
 
     _run_async(scenario())
+
+
+def test_queue_full_su_cap_del_servizio() -> None:
+    """Il servizio applica il cap via store.enqueue(queue_cap=...); dopo N
+    inserti non-terminali il prossimo QueueFull. Un replay idempotente
+    resta ammesso perché la chiave esiste già.
+    """
+    import asyncio as _asyncio
+
+    from newray.kernel.errors import QueueFull
+    from newray.kernel.identity import Principal, Role
+    from newray.kernel.identity import new_id as _new_id
+    from newray.modules.runs import DurableRunService
+    from newray.modules.runs.domain import PreparedInlineRun
+
+    class _FakeStore:
+        def __init__(self) -> None:
+            self.count = 0
+            self.by_key: dict[str, DurableRun] = {}
+
+        def enqueue(self, run: DurableRun, *, queue_cap: int | None = None) -> DurableRun:
+            existing = self.by_key.get(run.idempotency_key)
+            if existing is not None:
+                return existing
+            if queue_cap is not None and self.count >= queue_cap:
+                raise QueueFull("piena")
+            self.by_key[run.idempotency_key] = run
+            self.count += 1
+            return run
+
+        def find_by_key(self, scope, conv_id, key):  # type: ignore[no-untyped-def]
+            return self.by_key.get(key)
+
+        def get(self, scope, run_id):  # type: ignore[no-untyped-def]
+            for run in self.by_key.values():
+                if run.id == run_id:
+                    return run
+            return None
+
+    from newray.modules.models import ChatMessage, ChatRequest, ChatRole
+    from newray.modules.profiles import ResolvedBinding
+
+    class _FakeInline:
+        async def prepare(
+            self, principal, conv_id, profile_id, content
+        ) -> PreparedInlineRun:  # type: ignore[no-untyped-def]
+            binding = ResolvedBinding(
+                profile_id=profile_id, profile_version_id=_new_id(),
+                binding_id=_new_id(), profile_version="v1", binding_name="b1",
+                runtime="ollama", model_name="m", digest="sha256:x",
+                parameters={}, capabilities=(), instructions="",
+            )
+            return PreparedInlineRun(
+                conversation_id=conv_id, content=content, binding=binding,
+                chat_request=ChatRequest(
+                    model="m", runtime="ollama",
+                    messages=(ChatMessage(ChatRole.USER, content),),
+                    parameters={}, max_tokens=128,
+                ),
+                request_hash="0" * 64, context_message_count=1,
+                context_character_count=len(content), context_truncated=False,
+            )
+
+    async def scenario() -> None:
+        store = _FakeStore()
+        inline = _FakeInline()
+        service = DurableRunService(
+            store,  # type: ignore[arg-type]
+            inline,  # type: ignore[arg-type]
+            queue_cap=2,
+        )
+        principal = Principal(
+            user_id=_new_id(), organization_id=_new_id(),
+            session_id=_new_id(), role=Role.OWNER,
+        )
+        conv_id = _new_id()
+        prof_id = _new_id()
+        await service.create(principal, conv_id, prof_id, "a", "k1")
+        await service.create(principal, conv_id, prof_id, "b", "k2")
+        # cap 2 raggiunto: k3 rifiutato
+        import pytest as _pytest
+        with _pytest.raises(QueueFull):
+            await service.create(principal, conv_id, prof_id, "c", "k3")
+        # replay idempotente su chiave esistente resta ammesso
+        replay = await service.create(principal, conv_id, prof_id, "a", "k1")
+        assert replay.idempotency_key == "k1"
+
+    _asyncio.run(scenario())
 
 
 def test_worker_fallisce_se_persistenza_messaggi_va_male() -> None:

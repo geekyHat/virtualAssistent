@@ -101,6 +101,18 @@ class InferenceFailed(DomainError):
     code = "INFERENCE_FAILED"
 
 
+class QueueFull(DomainError):
+    """La coda dei run non-terminali per lo scope è piena (NewRay.md §8.3).
+
+    Il cap protegge da accumuli indefiniti (bug client, retry senza
+    idempotency, script runaway) senza compromettere run già in corso.
+    Recuperabile con nuovo tentativo dopo che un run in coda transita a
+    stato terminale; non è un guasto del runtime.
+    """
+
+    code = "QUEUE_FULL"
+
+
 class InferenceTimeout(DomainError):
     """La generazione ha superato il limite di tempo esplicito (NewRay.md §19.4).
 

@@ -128,7 +128,7 @@ def build_app() -> FastAPI:
             )
             app.state.inline_run_service = inline
             app.state.durable_run_service = DurableRunService(
-                PostgresRunStore(engine), inline
+                PostgresRunStore(engine), inline, queue_cap=settings.runs_queue_cap
             )
             yield
 

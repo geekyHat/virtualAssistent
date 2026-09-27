@@ -17,6 +17,7 @@ integration.
 from __future__ import annotations
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -25,6 +26,7 @@ from sqlalchemy import text
 
 from newray.infrastructure.database import create_engine
 from newray.kernel.clock import SystemClock
+from newray.kernel.errors import QueueFull
 from newray.kernel.identity import Scope
 from newray.modules.conversations import ConversationService
 from newray.modules.conversations.adapters.postgres import (
@@ -241,6 +243,104 @@ def test_cancel_idempotente_e_su_run_terminale(
         assert after.state == RunState.FAILED
     finally:
         engine.dispose()
+
+
+def test_queue_cap_rifiuta_e_ignora_run_terminali(
+    test_databases: DatabaseHandles,
+) -> None:
+    """Con cap N: N run non-terminali → il successivo QUEUE_FULL. Un run
+    che passa a terminale libera lo slot; run di un altro owner non
+    influenzano il conteggio di questo scope."""
+    engine = create_engine(test_databases.app)
+    try:
+        owner, conversation = _bootstrap(engine, "Cap owner", "cap")
+        store = PostgresRunStore(engine)
+        # Riempio la coda con 3 run non-terminali; il 4° è rifiutato.
+        for i in range(3):
+            store.enqueue(_run_row(owner, conversation.id, key=f"cap-{i}"), queue_cap=3)
+        with pytest.raises(QueueFull):
+            store.enqueue(_run_row(owner, conversation.id, key="cap-3"), queue_cap=3)
+
+        # Replay idempotente ha precedenza sul cap: stessa chiave → stessa ricevuta.
+        replay = store.enqueue(_run_row(owner, conversation.id, key="cap-0"), queue_cap=3)
+        assert replay.idempotency_key == "cap-0"
+
+        # Marchio uno dei run come terminale (via claim + fail): il cap
+        # scende, il nuovo inserimento passa.
+        first = store.get(Scope(owner.organization_id, owner.user_id),
+                         store.find_by_key(
+                             Scope(owner.organization_id, owner.user_id),
+                             conversation.id, "cap-0",
+                         ).id)  # type: ignore[union-attr]
+        assert first is not None
+        worker_id = uuid.uuid4()
+        now = datetime.now(UTC)
+        claim = store.claim_next(
+            worker_id=worker_id, lease_until=now + timedelta(seconds=30), now=now
+        )
+        assert claim is not None
+        store.fail(
+            scope=Scope(owner.organization_id, owner.user_id),
+            run_id=claim.run.id, worker_id=worker_id, fence=claim.fence,
+            error_code="INFERENCE_FAILED", finish_reason="failed",
+            partial_text="", now=now + timedelta(seconds=1),
+        )
+        # Ora c'è spazio: il 4° passa.
+        released = store.enqueue(
+            _run_row(owner, conversation.id, key="cap-3"), queue_cap=3
+        )
+        assert released.idempotency_key == "cap-3"
+    finally:
+        engine.dispose()
+
+
+def test_queue_cap_serializza_create_concorrenti(
+    test_databases: DatabaseHandles,
+) -> None:
+    """Due enqueue concorrenti al bordo del cap: uno solo passa, l'altro
+    riceve QueueFull. L'advisory lock per (org, owner) evita la race."""
+    engine = create_engine(test_databases.app)
+    try:
+        owner, conversation = _bootstrap(engine, "Race owner", "race")
+        store = PostgresRunStore(engine)
+        # Cap = 2; ne inserisco 1 e provo due create concorrenti: uno
+        # solo dei due deve passare, l'altro riceve QueueFull.
+        store.enqueue(_run_row(owner, conversation.id, key="race-0"), queue_cap=2)
+
+        def try_enqueue(index: int) -> str:
+            try:
+                store.enqueue(
+                    _run_row(owner, conversation.id, key=f"race-{index}"),
+                    queue_cap=2,
+                )
+                return "ok"
+            except QueueFull:
+                return "rejected"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(try_enqueue, [1, 2]))
+
+        assert sorted(results) == ["ok", "rejected"]
+        # Solo 2 run non-terminali in totale per lo scope.
+        with engine.connect() as conn:
+            _scope_conn(conn, owner)
+            count = conn.execute(
+                text("SELECT count(*) FROM runs WHERE state = 'queued'")
+            ).scalar_one()
+        assert count == 2
+    finally:
+        engine.dispose()
+
+
+def _scope_conn(conn, owner) -> None:
+    conn.execute(
+        text("SELECT set_config('app.user_id', :v, true)"),
+        {"v": str(owner.user_id)},
+    )
+    conn.execute(
+        text("SELECT set_config('app.organization_id', :v, true)"),
+        {"v": str(owner.organization_id)},
+    )
 
 
 def test_grant_su_colonne_worker(test_databases: DatabaseHandles) -> None:

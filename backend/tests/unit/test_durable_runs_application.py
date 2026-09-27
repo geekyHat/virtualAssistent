@@ -19,13 +19,18 @@ class FakeStore:
         self.by_key: dict[tuple[Scope, uuid.UUID, str], DurableRun] = {}
         self.insertions = 0
 
-    def enqueue(self, run: DurableRun) -> DurableRun:
+    def enqueue(
+        self, run: DurableRun, *, queue_cap: int | None = None
+    ) -> DurableRun:
         key = (Scope(run.organization_id, run.owner_id), run.conversation_id, run.idempotency_key)
         existing = self.by_key.get(key)
         if existing is not None:
             if existing.payload_hash != run.payload_hash:
                 raise Conflict("chiave riutilizzata")
             return existing
+        if queue_cap is not None and self.insertions >= queue_cap:
+            from newray.kernel.errors import QueueFull
+            raise QueueFull("coda piena")
         self.by_key[key] = run
         self.insertions += 1
         return run

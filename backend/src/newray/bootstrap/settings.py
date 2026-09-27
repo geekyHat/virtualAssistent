@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     #: Budget iniziale prudente; non modifica tag o Modelfile già installati.
     model_context_length: int = Field(default=8192, ge=1024, le=16384)
     model_max_context_length: int = Field(default=16384, ge=1024, le=32768)
+    #: Cap sul numero di run non-terminali per scope. Protegge da accumuli
+    #: indefiniti (retry senza idempotency, script runaway). Rifiuto
+    #: immediato con QUEUE_FULL (HTTP 429) quando pieno; recupero quando
+    #: un run in corso transita a terminale (NewRay.md §8.3).
+    runs_queue_cap: int = Field(default=8, ge=1, le=1024)
 
     @model_validator(mode="after")
     def _valida_budget_modello(self) -> Settings:
